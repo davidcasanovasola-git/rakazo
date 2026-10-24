@@ -505,5 +505,5 @@ export function parseOpenAiAuthorizationInput(
     };
   }
 
-  return { code: value };
+  throw new Error("Missing OAuth state.");
 }

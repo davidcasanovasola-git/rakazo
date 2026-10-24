@@ -120,6 +120,10 @@ describe("OpenAI ChatGPT OAuth (SIWC Authorization Code + PKCE)", () => {
         "http://localhost:1455/auth/callback",
       ),
     ).toThrow("ChatGPT authorization failed: access_denied");
+
+    expect(() => parseOpenAiAuthorizationInput("bare-authorization-code")).toThrow(
+      "Missing OAuth state.",
+    );
   });
 
   it("completes the authorization code flow, validates state/nonce/ID token, and returns an OAuth credential", async () => {

@@ -98,7 +98,7 @@ describe("mountModelOAuthRoutes", () => {
         });
         const callbackUrl = await interaction.prompt({
           type: "manual_code",
-          message: "Paste the callback URL or authorization code",
+          message: "Complete sign-in in your browser, or paste the callback URL:",
         });
         if (callbackUrl.includes("code=exchange-fail")) {
           throw new Error("OpenAI OAuth token exchange failed (HTTP 400).");

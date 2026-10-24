@@ -2012,7 +2012,7 @@ describe("PiOAuthLogins", () => {
         });
         const pasted = await interaction.prompt({
           type: "manual_code",
-          message: "Paste the callback URL or authorization code",
+          message: "Complete sign-in in your browser, or paste the callback URL:",
         });
         if (pasted.includes("fail-exchange")) {
           throw new Error("OpenAI OAuth token exchange failed (HTTP 400).");
@@ -2111,7 +2111,7 @@ describe("PiOAuthLogins", () => {
         });
         const pasted = await interaction.prompt({
           type: "manual_code",
-          message: "Paste the callback URL or authorization code",
+          message: "Complete sign-in in your browser, or paste the callback URL:",
         });
         if (pasted.includes("fail-exchange")) {
           throw new Error("OpenAI OAuth token exchange failed (HTTP 400).");
