@@ -652,7 +652,7 @@ OPENAI_OAUTH_CLIENT_SECRET=replace-with-openai-oauth-client-secret
 OPENAI_OAUTH_REDIRECT_URI=https://app.example.com/api/oauth/openai-codex/callback
 ```
 
-For remote HTTPS deployments—including Tailscale Serve (`https://rakazo.example.ts.net`) and reverse proxies forwarding `X-Forwarded-Proto: https` and `X-Forwarded-Host`—register `https://<your-host>/api/oauth/openai-codex/callback` with OpenAI and set `OPENAI_OAUTH_REDIRECT_URI` (or `WEB_ORIGIN`) to match. If the redirect URI is a loopback callback that does not load in the user's browser on a remote VM, the user can copy the final callback URL or `code` parameter from the browser address bar and paste it into Rakazo to finish signing in.
+For remote HTTPS deployments—including Tailscale Serve (`https://rakazo.example.ts.net`) and reverse proxies forwarding `X-Forwarded-Proto: https` and `X-Forwarded-Host`—register `https://<your-host>/api/oauth/openai-codex/callback` with OpenAI and set `OPENAI_OAUTH_REDIRECT_URI` (or `WEB_ORIGIN`) to match. If the redirect URI is a loopback callback that does not load in the user's browser on a remote VM, the user can copy the final callback URL from the browser address bar and paste it into Rakazo to finish signing in.
 
 Each user can also connect their own OpenAI-compatible endpoint from **Connect a model** /
 **Settings → Models** on web and mobile. Choose **OpenAI-compatible**, enter the server base URL

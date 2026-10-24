@@ -9,15 +9,22 @@ import Models from "../app/(settings)/models";
 import { modelPickerRequest, selectPickerModel } from "./model-picker-selection";
 
 const savedEndpoint = "https://models.example.test/v1";
-const { push, saved } = vi.hoisted(() => ({
+const { push, saved, rpcOverrides } = vi.hoisted(() => ({
   push: vi.fn(),
   saved: { baseUrl: "https://models.example.test/v1", hasKey: false },
+  rpcOverrides: {
+    handler: null as ((procedure: string, input?: unknown) => Promise<unknown>) | null,
+  },
 }));
 
 vi.mock("./api", () => ({
   captureApiRequestContext: async () => ({}),
   selectedSpaceId: () => "space-fixture",
-  rpc: async (procedure: string) => {
+  rpc: async (procedure: string, input?: unknown) => {
+    if (rpcOverrides.handler) {
+      const custom = await rpcOverrides.handler(procedure, input);
+      if (custom !== undefined) return custom;
+    }
     if (procedure === "me")
       return {
         userId: "user-fixture",
@@ -141,6 +148,7 @@ beforeEach(async () => {
   await act(async () => advanced!.click());
 });
 afterEach(async () => {
+  rpcOverrides.handler = null;
   await act(async () => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
@@ -278,3 +286,93 @@ it.each(["https://ollama.com", "https://ollama.com/v1/"])(
     }
   },
 );
+
+it("polls completeOAuth and finishes auth-url sign-in on mobile when the browser callback completes", async () => {
+  const finishedLogins: string[] = [];
+  let connected = false;
+  rpcOverrides.handler = async (procedure, input) => {
+    if (procedure === "me") {
+      return {
+        userId: "user-fixture",
+        spaceId: "space-fixture",
+        defaultProvider: "openai-codex",
+        defaultModel: "gpt-5.3-codex",
+      };
+    }
+    if (procedure === "models/list") {
+      return [
+        {
+          provider: "openai-codex",
+          providerName: "ChatGPT",
+          id: "gpt-5.3-codex",
+          label: "GPT-5.3 Codex",
+          billing: "Subscription",
+          auth: "oauth",
+          signIn: "device-code",
+          oauthLabel: "Sign in with ChatGPT Plus/Pro",
+          alternateSignIn: "auth-url",
+          alternateOauthLabel: "Sign in with ChatGPT",
+        },
+      ];
+    }
+    if (procedure === "models/credentials") {
+      return connected
+        ? [
+            {
+              id: "cred-codex",
+              provider: "openai-codex",
+              modelId: "gpt-5.3-codex",
+              hasKey: false,
+              authKind: "oauth",
+              isDefault: true,
+              label: "ChatGPT",
+            },
+          ]
+        : [];
+    }
+    if (procedure === "models/beginOAuth") {
+      return {
+        mode: "auth-url",
+        loginId: "login-mobile-siwc-1",
+        verificationUri:
+          "https://auth.openai.com/api/accounts/authorize?response_type=code&client_id=client-placeholder&redirect_uri=https%3A%2F%2Frakazo.example.ts.net%2Fapi%2Foauth%2Fopenai-codex%2Fcallback&state=state-1&code_challenge=challenge-1&code_challenge_method=S256",
+        expiresInSeconds: 600,
+      };
+    }
+    if (procedure === "models/completeOAuth") {
+      return { status: "ready" };
+    }
+    if (procedure === "models/finishOAuth") {
+      finishedLogins.push((input as { loginId: string }).loginId);
+      connected = true;
+      return {
+        id: "cred-codex",
+        provider: "openai-codex",
+        modelId: "gpt-5.3-codex",
+        hasKey: false,
+        authKind: "oauth",
+        isDefault: true,
+        label: "ChatGPT",
+      };
+    }
+    return undefined;
+  };
+
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await act(async () => root.render(createElement(Models)));
+
+  const siwcButton = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Sign in with ChatGPT",
+  );
+  expect(siwcButton).toBeDefined();
+
+  await act(async () => {
+    siwcButton!.click();
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+
+  expect(finishedLogins).toEqual(["login-mobile-siwc-1"]);
+});

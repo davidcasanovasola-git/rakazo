@@ -1124,6 +1124,14 @@ export class PiOAuthLogins {
   submit(loginId: string, actor: { userId: string; spaceId: string }, code: string): { ok: true } {
     const session = this.pending.get(loginId);
     if (!session || session.userId !== actor.userId || session.spaceId !== actor.spaceId) {
+      const alreadyPersisted = this.persistedByLoginId.get(loginId);
+      if (
+        alreadyPersisted &&
+        alreadyPersisted.userId === actor.userId &&
+        alreadyPersisted.spaceId === actor.spaceId
+      ) {
+        return { ok: true };
+      }
       throw new Error("Sign-in session not found. Start sign-in again.");
     }
     if (session.error) throw new Error(session.error);
@@ -1354,6 +1362,34 @@ export class PiOAuthLogins {
       spaceId: session.spaceId,
       value: finished.value,
     };
+  }
+
+  isStateSupersededForActor(input: {
+    previousState: string;
+    currentState: string;
+    userId: string;
+    spaceId: string;
+    provider: string;
+  }): boolean {
+    this.pruneRecordedStates();
+    const previous =
+      this.cancelledStates.get(input.previousState) ?? this.expiredStates.get(input.previousState);
+    if (
+      !previous ||
+      previous.userId !== input.userId ||
+      previous.spaceId !== input.spaceId ||
+      previous.provider !== input.provider
+    ) {
+      return false;
+    }
+    const active = this.pendingByOAuthState.get(input.currentState);
+    return Boolean(
+      active?.oauthState &&
+        timingSafeEqualStrings(input.currentState, active.oauthState) &&
+        active.userId === input.userId &&
+        active.spaceId === input.spaceId &&
+        active.provider === input.provider,
+    );
   }
 
   complete(loginId: string, actor: { userId: string; spaceId: string }): PiOAuthComplete {

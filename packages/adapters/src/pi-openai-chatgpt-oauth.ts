@@ -133,7 +133,7 @@ export function createOpenAiChatGptOAuthLogin(options: OpenAiChatGptOAuthOptions
 
     const input = await interaction.prompt({
       type: "manual_code",
-      message: "Complete sign-in in your browser, or paste the authorization code / redirect URL:",
+      message: "Complete sign-in in your browser, or paste the callback URL:",
       placeholder: config.redirectUri,
       signal,
     });
@@ -375,26 +375,21 @@ function validateOpenAiIdTokenClaims(
   }
   const issuer = payload.iss;
   if (
-    issuer !== undefined &&
-    issuer !== OPENAI_OAUTH_ISSUER &&
-    issuer !== `${OPENAI_OAUTH_ISSUER}/`
+    typeof issuer !== "string" ||
+    (issuer !== OPENAI_OAUTH_ISSUER && issuer !== `${OPENAI_OAUTH_ISSUER}/`)
   ) {
     throw new Error("OpenAI OAuth ID token issuer mismatch.");
   }
   const audience = payload.aud;
-  if (audience !== undefined) {
-    const matchesAudience =
-      (typeof audience === "string" && audience === options.clientId) ||
-      (Array.isArray(audience) && audience.includes(options.clientId));
-    if (!matchesAudience) {
-      throw new Error("OpenAI OAuth ID token audience mismatch.");
-    }
+  const matchesAudience =
+    (typeof audience === "string" && audience === options.clientId) ||
+    (Array.isArray(audience) && audience.includes(options.clientId));
+  if (!matchesAudience) {
+    throw new Error("OpenAI OAuth ID token audience mismatch.");
   }
   const exp = payload.exp;
-  if (exp !== undefined) {
-    if (typeof exp !== "number" || !Number.isFinite(exp) || exp * 1000 <= Date.now()) {
-      throw new Error("OpenAI OAuth ID token has expired.");
-    }
+  if (typeof exp !== "number" || !Number.isFinite(exp) || exp * 1000 <= Date.now()) {
+    throw new Error("OpenAI OAuth ID token has expired.");
   }
   return payload;
 }

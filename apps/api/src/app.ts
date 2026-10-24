@@ -102,6 +102,7 @@ import {
   requireMembership,
   rowSecurityWarning,
   runAsSystem,
+  runAsTenant,
   securityEventRetentionDays,
   verifyContentKeys,
 } from "@rakazo/db";
@@ -627,7 +628,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     : undefined;
   reconciler?.start();
 
-  const router = createRouter({
+  const routerDeps = {
     analytics,
     cloudAgent,
     codexCatalog,
@@ -671,6 +672,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       deploymentModelConfigured: env.deploymentModelConfigured,
       deploymentModelHostCredentials: env.deploymentModelHostCredentials,
       webOrigin: env.webOrigin,
+      authSecret: env.authSecret,
       privacyPolicyUrl: env.privacyPolicyUrl,
       screenProxySecret: env.screenProxySecret,
       sandboxProvider: env.sandboxProvider,
@@ -679,7 +681,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
       desktopHostChoiceEnabled: Boolean(env.desktopStackToken),
     },
-  });
+  };
+  const router = createRouter(routerDeps);
   const rpc = new RPCHandler(router, {
     clientInterceptors: [onError((error, { path }) => handleRpcError(error, path))],
   });
@@ -796,64 +799,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       return { actor: session.actor, authenticatedUser: true };
     },
     persistOAuthCredential: (actor, login) =>
-      persistOAuthLoginCredential(
-        {
-          analytics,
-          cloudAgent,
-          codexCatalog,
-          prisma,
-          pushTokens,
-          events,
-          ticketChanges,
-          boardEvents,
-          auth,
-          jobs,
-          sandbox,
-          memory,
-          memoryProviders,
-          home,
-          secrets,
-          oauthLogins,
-          integrationSettings,
-          mcpOAuth,
-          mcp,
-          composio: stack.composio,
-          connectors: stack.connector,
-          remoteConnectors,
-          modelConnectionFetch,
-          artifacts,
-          dataDir: env.dataDir,
-          billing,
-          messaging: {
-            enabled: Boolean(messaging),
-            providers: messaging?.platforms().map((platform) => platform.provider) ?? [],
-            openSignup: env.messagingOpenSignup,
-          },
-          env: {
-            phoneCallsEnabled: env.phoneCallsEnabled,
-            phoneCallRingSeconds: env.phoneCallRingSeconds,
-            ticketBoardEnabled,
-            agentRuntime: env.agentRuntime,
-            defaultProvider: env.defaultProvider,
-            defaultModel: env.defaultModel,
-            teamChatJudgeProvider: env.teamChatJudgeProvider,
-            teamChatJudgeModel: env.teamChatJudgeModel,
-            deploymentModelConfigured: env.deploymentModelConfigured,
-            deploymentModelHostCredentials: env.deploymentModelHostCredentials,
-            webOrigin: env.webOrigin,
-            privacyPolicyUrl: env.privacyPolicyUrl,
-            screenProxySecret: env.screenProxySecret,
-            sandboxProvider: env.sandboxProvider,
-            gitSha: env.gitSha,
-            integrationsCatalogUrl: env.integrationsCatalogUrl,
-            mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
-            desktopHostChoiceEnabled: Boolean(env.desktopStackToken),
-          },
-        },
-        actor,
-        login,
-        codexCatalog,
-      ),
+      runAsTenant(actor, () => persistOAuthLoginCredential(routerDeps, actor, login, codexCatalog)),
   });
   app.use(
     "/rpc/*",
@@ -868,6 +814,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     if (actor) {
       enrichLogContext({ "user.id": actor.userId, "space.id": actor.spaceId });
     }
+    const extraHeaders: Array<[string, string]> = [];
     const { matched, response } = await rpc.handle(c.req.raw, {
       prefix: "/rpc",
       context: {
@@ -875,6 +822,9 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         sessionId: actor ? session?.sessionId : undefined,
         signal: c.req.raw.signal,
         request: c.req.raw,
+        setResponseHeader: (name, value) => {
+          extraHeaders.push([name, value]);
+        },
         // Same user in the same space, so leaving the space also ends a stream.
         // A database failure rejects this check; only a missing membership is unauthorized.
         stillAuthorized: async () => {
@@ -885,7 +835,19 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         },
       },
     });
-    if (matched) return c.newResponse(response.body, response);
+    if (matched) {
+      if (extraHeaders.length === 0) return c.newResponse(response.body, response);
+      const headers = new Headers(response.headers);
+      for (const [name, value] of extraHeaders) {
+        headers.append(name, value);
+      }
+      const patched = new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+      return c.newResponse(patched.body, patched);
+    }
     await next();
   });
   mountVoiceHttpRoutes(app, { prisma, secrets, env }, async (c) => {

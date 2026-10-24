@@ -187,8 +187,26 @@ describe("OpenAI ChatGPT OAuth (SIWC Authorization Code + PKCE)", () => {
     });
   });
 
-  it("rejects mismatched state and nonce tampering", async () => {
+  it("rejects mismatched state, bare code without state, and missing or invalid ID token claims", async () => {
     let capturedState = "";
+    let capturedNonce = "";
+    let promptMessage = "";
+    const interactionBareCode: AuthInteraction = {
+      signal: new AbortController().signal,
+      notify() {},
+      async prompt(req) {
+        promptMessage = req.message;
+        return "bare-authorization-code-only";
+      },
+    };
+
+    const loginMismatch = createOpenAiChatGptOAuthLogin({
+      clientId: "client-placeholder",
+      redirectUri: "https://app.example.com/api/oauth/openai-codex/callback",
+    });
+    await expect(loginMismatch(interactionBareCode)).rejects.toThrow("Missing OAuth state.");
+    expect(promptMessage).toBe("Complete sign-in in your browser, or paste the callback URL:");
+
     const interactionMismatchState: AuthInteraction = {
       signal: new AbortController().signal,
       notify(event) {
@@ -201,44 +219,67 @@ describe("OpenAI ChatGPT OAuth (SIWC Authorization Code + PKCE)", () => {
       },
     };
 
-    const loginMismatch = createOpenAiChatGptOAuthLogin({
-      clientId: "client-placeholder",
-      redirectUri: "https://app.example.com/api/oauth/openai-codex/callback",
-    });
     await expect(loginMismatch(interactionMismatchState)).rejects.toThrow("OAuth state mismatch.");
 
-    const interactionBadNonce: AuthInteraction = {
+    const makeValidPromptInteraction = (): AuthInteraction => ({
       signal: new AbortController().signal,
       notify(event) {
         if (event.type === "auth_url") {
-          capturedState = new URL(event.url).searchParams.get("state") ?? "";
+          const parsed = new URL(event.url);
+          capturedState = parsed.searchParams.get("state") ?? "";
+          capturedNonce = parsed.searchParams.get("nonce") ?? "";
         }
       },
       async prompt() {
         return `https://app.example.com/api/oauth/openai-codex/callback?code=code-xyz&state=${capturedState}`;
       },
-    };
-
-    const fetchBadNonce = vi.fn<typeof fetch>(async () =>
-      Response.json({
-        access_token: "access-placeholder",
-        refresh_token: "refresh-placeholder",
-        id_token: makeJwt({
-          iss: OPENAI_OAUTH_ISSUER,
-          aud: "client-placeholder",
-          nonce: "wrong-nonce",
-          exp: Math.floor(Date.now() / 1000) + 3600,
-        }),
-        expires_in: 3600,
-      }),
-    );
-
-    const loginBadNonce = createOpenAiChatGptOAuthLogin({
-      clientId: "client-placeholder",
-      redirectUri: "https://app.example.com/api/oauth/openai-codex/callback",
-      fetch: fetchBadNonce,
     });
-    await expect(loginBadNonce(interactionBadNonce)).rejects.toThrow(/nonce mismatch/);
+
+    const loginWithClaims = (claimsBuilder: (nonce: string) => Record<string, unknown>) =>
+      createOpenAiChatGptOAuthLogin({
+        clientId: "client-placeholder",
+        redirectUri: "https://app.example.com/api/oauth/openai-codex/callback",
+        fetch: async () =>
+          Response.json({
+            access_token: "access-placeholder",
+            refresh_token: "refresh-placeholder",
+            id_token: makeJwt(claimsBuilder(capturedNonce)),
+            expires_in: 3600,
+          }),
+      });
+
+    await expect(
+      loginWithClaims(() => ({
+        iss: OPENAI_OAUTH_ISSUER,
+        aud: "client-placeholder",
+        nonce: "wrong-nonce",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      }))(makeValidPromptInteraction()),
+    ).rejects.toThrow(/nonce mismatch/);
+
+    await expect(
+      loginWithClaims((nonce) => ({
+        aud: "client-placeholder",
+        nonce,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      }))(makeValidPromptInteraction()),
+    ).rejects.toThrow(/issuer mismatch/);
+
+    await expect(
+      loginWithClaims((nonce) => ({
+        iss: OPENAI_OAUTH_ISSUER,
+        nonce,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      }))(makeValidPromptInteraction()),
+    ).rejects.toThrow(/audience mismatch/);
+
+    await expect(
+      loginWithClaims((nonce) => ({
+        iss: OPENAI_OAUTH_ISSUER,
+        aud: "client-placeholder",
+        nonce,
+      }))(makeValidPromptInteraction()),
+    ).rejects.toThrow(/ID token has expired/);
   });
 
   it("refreshes an SIWC OAuth token using the stored clientId", async () => {

@@ -189,6 +189,7 @@ export default function Models() {
   const [feedbackAnchor, setFeedbackAnchor] = useState<FeedbackAnchor>("connection");
   const oauthAbortRef = useRef<AbortController | null>(null);
   const oauthLoginIdRef = useRef<string | null>(null);
+  const oauthFinishingRef = useRef<{ loginId: string; promise: Promise<void> } | null>(null);
   const oauthCodeSubmittingRef = useRef(false);
   const [codeCopied, setCodeCopied] = useState(false);
   const codeCopiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -226,6 +227,7 @@ export default function Models() {
   const cancelOAuth = useCallback(() => {
     const loginId = oauthLoginIdRef.current;
     oauthLoginIdRef.current = null;
+    oauthFinishingRef.current = null;
     cancelModelOAuthAttempt(oauthAbortRef, () => {
       setOauth(null);
       setOauthPending(false);
@@ -796,17 +798,28 @@ export default function Models() {
   }
 
   async function finishSubscriptionSignIn(loginId: string, controller: AbortController) {
-    await waitForModelOAuth(loginId, controller.signal);
-    if (controller.signal.aborted) return;
-    await rpc("models/finishOAuth", { loginId }, { signal: controller.signal });
-    if (controller.signal.aborted) return;
-    oauthLoginIdRef.current = null;
-    setOauth(null);
-    await load({ provider, modelId });
-    if (controller.signal.aborted) return;
-    publishFeedback("connection", {
-      notice: t("Connected and using {label}.", { label: selected?.label ?? t("this model") }),
+    if (oauthFinishingRef.current?.loginId === loginId) {
+      return oauthFinishingRef.current.promise;
+    }
+    const promise = (async () => {
+      await waitForModelOAuth(loginId, controller.signal);
+      if (controller.signal.aborted) return;
+      await rpc("models/finishOAuth", { loginId }, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      oauthLoginIdRef.current = null;
+      setOauth(null);
+      await load({ provider, modelId });
+      if (controller.signal.aborted) return;
+      publishFeedback("connection", {
+        notice: t("Connected and using {label}.", { label: selected?.label ?? t("this model") }),
+      });
+    })().finally(() => {
+      if (oauthFinishingRef.current?.loginId === loginId) {
+        oauthFinishingRef.current = null;
+      }
     });
+    oauthFinishingRef.current = { loginId, promise };
+    return promise;
   }
 
   async function startSubscriptionSignIn(mode?: ModelOAuthSignInMode) {
@@ -815,7 +828,6 @@ export default function Models() {
     setOauthPending(true);
     const controller = new AbortController();
     oauthAbortRef.current = controller;
-    let waitingForCode = false;
     try {
       const started = await rpc<ModelOAuthBegin>(
         "models/beginOAuth",
@@ -836,8 +848,7 @@ export default function Models() {
       setPasteCode("");
       setOauth(started);
       await Linking.openURL(started.verificationUri);
-      waitingForCode = started.mode === "auth-url";
-      if (!waitingForCode) await finishSubscriptionSignIn(started.loginId, controller);
+      await finishSubscriptionSignIn(started.loginId, controller);
     } catch (err) {
       if (controller.signal.aborted) return;
       const loginId = oauthLoginIdRef.current;
@@ -848,9 +859,7 @@ export default function Models() {
       });
       setOauth(null);
     } finally {
-      if (!waitingForCode) {
-        finishModelOAuthAttempt(oauthAbortRef, controller, () => setOauthPending(false));
-      }
+      finishModelOAuthAttempt(oauthAbortRef, controller, () => setOauthPending(false));
     }
   }
 

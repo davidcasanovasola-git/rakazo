@@ -77,6 +77,9 @@ importers:
       '@rakazo/memory':
         specifier: workspace:*
         version: link:../../packages/memory
+      '@rakazo/ui-tokens':
+        specifier: workspace:*
+        version: link:../../packages/ui-tokens
       hono:
         specifier: 4.13.13
         version: 4.13.13

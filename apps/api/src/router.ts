@@ -295,7 +295,11 @@ import {
   serializeSpaceMemoryConfig,
   updateMemoryProviderDefaultScope,
 } from "./memory-provider-config.js";
-import { resolveOpenAiCallbackRedirectUri } from "./model-oauth-routes.js";
+import {
+  clearOpenAiOAuthBindingCookieHeader,
+  createOpenAiOAuthBindingCookieHeader,
+  resolveOpenAiCallbackRedirectUri,
+} from "./model-oauth-routes.js";
 import {
   chooseFocus,
   dismissFocus,
@@ -718,6 +722,7 @@ export interface RouterDeps {
     deploymentModelConfigured?: boolean;
     deploymentModelHostCredentials?: boolean;
     webOrigin: string;
+    authSecret?: string;
     privacyPolicyUrl?: string;
     screenProxySecret: string;
     sandboxProvider: string;
@@ -977,6 +982,7 @@ export function createRouter(deps: RouterDeps) {
     sessionId?: string;
     signal?: AbortSignal;
     request?: Request;
+    setResponseHeader?: (name: string, value: string) => void;
     /** Re-runs the request's auth so a long-lived stream notices sign-out and revocation. */
     stillAuthorized?: () => Promise<boolean>;
   }>();
@@ -1737,7 +1743,7 @@ export function createRouter(deps: RouterDeps) {
           }
         }
         try {
-          return await deps.oauthLogins.begin({
+          const started = await deps.oauthLogins.begin({
             userId: context.actor.userId,
             spaceId: context.actor.spaceId,
             provider: input.provider,
@@ -1748,6 +1754,28 @@ export function createRouter(deps: RouterDeps) {
             label: input.label,
             signal: context.signal,
           });
+          if (input.provider === CHATGPT_OAUTH_PROVIDER) {
+            if (started.mode === "auth-url" && deps.env.authSecret) {
+              const cookieHeader = createOpenAiOAuthBindingCookieHeader({
+                loginId: started.loginId,
+                userId: context.actor.userId,
+                spaceId: context.actor.spaceId,
+                verificationUri: started.verificationUri,
+                redirectUri,
+                request: context.request,
+                authSecret: deps.env.authSecret,
+              });
+              if (cookieHeader) {
+                context.setResponseHeader?.("set-cookie", cookieHeader);
+              }
+            } else {
+              context.setResponseHeader?.(
+                "set-cookie",
+                clearOpenAiOAuthBindingCookieHeader({ request: context.request }),
+              );
+            }
+          }
+          return started;
         } catch (error) {
           throw new ORPCError("BAD_REQUEST", {
             message: error instanceof Error ? error.message : "Could not start sign-in.",
@@ -1786,6 +1814,10 @@ export function createRouter(deps: RouterDeps) {
       }),
       cancelOAuth: authed.models.cancelOAuth.handler(async ({ context, input }) => {
         await deps.oauthLogins.cancel(input.loginId, context.actor);
+        context.setResponseHeader?.(
+          "set-cookie",
+          clearOpenAiOAuthBindingCookieHeader({ request: context.request }),
+        );
         return { ok: true as const };
       }),
       setDefault: authed.models.setDefault.handler(async ({ context, input }) => {
@@ -7443,20 +7475,22 @@ export async function persistOAuthLoginCredential(
   login: PiOAuthConnected,
   codexCatalog: CodexLiveCatalog = deps.codexCatalog ?? new CodexCatalogCache(),
 ) {
-  return persistModelCredential(
-    deps,
-    actor,
-    {
-      provider: login.provider,
-      plaintext: serializeModelSecret({ kind: "oauth", credential: login.credential }),
-      label:
-        login.label ??
-        listPiCatalog().find((entry) => entry.provider === login.provider)?.providerName,
-      modelId: login.modelId,
-      thinkingLevel: login.thinkingLevel,
-      signal: login.signal,
-    },
-    codexCatalog,
+  return runAsTenant(actor, () =>
+    persistModelCredential(
+      deps,
+      actor,
+      {
+        provider: login.provider,
+        plaintext: serializeModelSecret({ kind: "oauth", credential: login.credential }),
+        label:
+          login.label ??
+          listPiCatalog().find((entry) => entry.provider === login.provider)?.providerName,
+        modelId: login.modelId,
+        thinkingLevel: login.thinkingLevel,
+        signal: login.signal,
+      },
+      codexCatalog,
+    ),
   );
 }
 

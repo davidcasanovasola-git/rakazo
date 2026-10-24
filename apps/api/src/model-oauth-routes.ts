@@ -11,6 +11,8 @@ import {
 } from "@rakazo/adapters";
 import type { Actor, ModelCredential, ThinkingLevel } from "@rakazo/contracts";
 import { ThinkingLevelSchema } from "@rakazo/contracts";
+import { runAsTenant } from "@rakazo/db";
+import { renderTokensCss } from "@rakazo/ui-tokens";
 import type { Hono } from "hono";
 
 export const OPENAI_CODEX_OAUTH_START_PATH = "/api/oauth/openai-codex/start";
@@ -203,6 +205,65 @@ function formatBindingCookie(value: string, maxAgeSeconds: number, secure: boole
   return attributes.join(";");
 }
 
+export function createOpenAiOAuthBindingCookieHeader(options: {
+  loginId: string;
+  userId: string;
+  spaceId: string;
+  verificationUri: string;
+  redirectUri?: string;
+  request?: Request;
+  authSecret: string;
+}): string | undefined {
+  let state: string | undefined;
+  try {
+    state = new URL(options.verificationUri).searchParams.get("state")?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+  if (!state) return undefined;
+  let requestUrl: URL | undefined;
+  if (options.request) {
+    try {
+      requestUrl = new URL(options.request.url);
+    } catch {
+      requestUrl = undefined;
+    }
+  }
+  const isSecure =
+    (options.redirectUri?.startsWith("https://") ?? false) ||
+    firstHeaderToken(options.request?.headers.get("x-forwarded-proto"))?.toLowerCase() ===
+      "https" ||
+    requestUrl?.protocol === "https:";
+  const cookieValue = signBindingCookie(
+    {
+      loginId: options.loginId,
+      userId: options.userId,
+      spaceId: options.spaceId,
+      state,
+      exp: Date.now() + OPENAI_OAUTH_STATE_TTL_SECONDS * 1000,
+    },
+    options.authSecret,
+  );
+  return formatBindingCookie(cookieValue, OPENAI_OAUTH_STATE_TTL_SECONDS, isSecure);
+}
+
+export function clearOpenAiOAuthBindingCookieHeader(options?: { request?: Request }): string {
+  let requestUrl: URL | undefined;
+  if (options?.request) {
+    try {
+      requestUrl = new URL(options.request.url);
+    } catch {
+      requestUrl = undefined;
+    }
+  }
+  const isSecure =
+    firstHeaderToken(options?.request?.headers.get("x-forwarded-proto"))?.toLowerCase() ===
+      "https" || requestUrl?.protocol === "https:";
+  return formatBindingCookie("", 0, isSecure);
+}
+
+const CALLBACK_TOKENS_CSS = renderTokensCss();
+
 function hasForbiddenRedirectParam(url: URL, body?: Record<string, unknown>): boolean {
   for (const param of FORBIDDEN_REDIRECT_PARAMS) {
     if (url.searchParams.has(param)) return true;
@@ -253,10 +314,11 @@ function renderOAuthCallbackHtml(options: {
     <meta name="referrer" content="no-referrer" />
     <title>${escapeHtml(options.title)}</title>
     <style>
-      body { font-family: system-ui, -apple-system, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0a0a0a; color: #fafafa; }
+${CALLBACK_TOKENS_CSS}
+      body { font-family: system-ui, -apple-system, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--background); color: var(--foreground); }
       main { max-width: 26rem; padding: 1.5rem; text-align: center; }
       h1 { font-size: 1.125rem; font-weight: 600; margin: 0 0 0.5rem; }
-      p { font-size: 0.875rem; color: #a1a1aa; margin: 0; line-height: 1.5; }
+      p { font-size: 0.875rem; color: var(--muted-foreground); margin: 0; line-height: 1.5; }
     </style>
   </head>
   <body>
@@ -386,26 +448,17 @@ export function mountModelOAuthRoutes(app: Hono, deps: ModelOAuthRoutesDeps): vo
         return c.json({ error: "Unexpected OAuth authorization origin." }, 500);
       }
 
-      const state = authorizeUrl.searchParams.get("state")?.trim();
-      if (state) {
-        const isSecure =
-          redirectUri.startsWith("https://") ||
-          firstHeaderToken(c.req.header("x-forwarded-proto"))?.toLowerCase() === "https" ||
-          requestUrl.protocol === "https:";
-        const cookieValue = signBindingCookie(
-          {
-            loginId: started.loginId,
-            userId: actor.userId,
-            spaceId: actor.spaceId,
-            state,
-            exp: Date.now() + OPENAI_OAUTH_STATE_TTL_SECONDS * 1000,
-          },
-          deps.authSecret,
-        );
-        c.header(
-          "set-cookie",
-          formatBindingCookie(cookieValue, OPENAI_OAUTH_STATE_TTL_SECONDS, isSecure),
-        );
+      const cookieHeader = createOpenAiOAuthBindingCookieHeader({
+        loginId: started.loginId,
+        userId: actor.userId,
+        spaceId: actor.spaceId,
+        verificationUri: started.verificationUri,
+        redirectUri,
+        request: c.req.raw,
+        authSecret: deps.authSecret,
+      });
+      if (cookieHeader) {
+        c.header("set-cookie", cookieHeader);
       }
 
       if (wantsJsonResponse(c.req.raw, requestUrl)) {
@@ -421,10 +474,7 @@ export function mountModelOAuthRoutes(app: Hono, deps: ModelOAuthRoutesDeps): vo
   app.get(OPENAI_CODEX_OAUTH_CALLBACK_PATH, async (c) => {
     const requestUrl = new URL(c.req.url);
     const jsonPreferred = wantsJsonResponse(c.req.raw, requestUrl);
-    const isSecure =
-      firstHeaderToken(c.req.header("x-forwarded-proto"))?.toLowerCase() === "https" ||
-      requestUrl.protocol === "https:";
-    c.header("set-cookie", formatBindingCookie("", 0, isSecure));
+    c.header("set-cookie", clearOpenAiOAuthBindingCookieHeader({ request: c.req.raw }));
 
     const respond = (
       status: 200 | 400 | 401 | 403 | 409 | 410 | 502,
@@ -517,13 +567,9 @@ export function mountModelOAuthRoutes(app: Hono, deps: ModelOAuthRoutesDeps): vo
     const code = requestUrl.searchParams.get("code")?.trim() ?? "";
     const oauthError = requestUrl.searchParams.get("error")?.trim() ?? "";
 
+    let cookieLoginId = boundCookie?.loginId;
     if (boundCookie) {
-      if (
-        boundCookie.userId !== actor.userId ||
-        boundCookie.spaceId !== actor.spaceId ||
-        !state ||
-        !timingSafeEqualStrings(boundCookie.state, state)
-      ) {
+      if (boundCookie.userId !== actor.userId || boundCookie.spaceId !== actor.spaceId || !state) {
         return respond(403, {
           ok: false,
           code: "forbidden",
@@ -531,6 +577,28 @@ export function mountModelOAuthRoutes(app: Hono, deps: ModelOAuthRoutesDeps): vo
           title: "ChatGPT sign-in failed",
           message: "OAuth callback does not match the active browser session.",
         });
+      }
+      const cookieMatchesState = timingSafeEqualStrings(boundCookie.state, state);
+      const cookieSupersededByActiveState =
+        !cookieMatchesState &&
+        deps.oauthLogins.isStateSupersededForActor({
+          previousState: boundCookie.state,
+          currentState: state,
+          userId: actor.userId,
+          spaceId: actor.spaceId,
+          provider: CHATGPT_OAUTH_PROVIDER,
+        });
+      if (!cookieMatchesState && !cookieSupersededByActiveState) {
+        return respond(403, {
+          ok: false,
+          code: "forbidden",
+          error: "OAuth callback does not match the active browser session.",
+          title: "ChatGPT sign-in failed",
+          message: "OAuth callback does not match the active browser session.",
+        });
+      }
+      if (cookieSupersededByActiveState) {
+        cookieLoginId = undefined;
       }
     }
 
@@ -555,7 +623,7 @@ export function mountModelOAuthRoutes(app: Hono, deps: ModelOAuthRoutesDeps): vo
         provider: CHATGPT_OAUTH_PROVIDER,
         userId: actor.userId,
         ...(enforcedSpaceId ? { spaceId: enforcedSpaceId } : {}),
-        ...(boundCookie?.loginId ? { loginId: boundCookie.loginId } : {}),
+        ...(cookieLoginId ? { loginId: cookieLoginId } : {}),
         state,
         code,
         error: oauthError,
@@ -570,7 +638,7 @@ export function mountModelOAuthRoutes(app: Hono, deps: ModelOAuthRoutesDeps): vo
         ) {
           throw new Error("You do not have access to this space.");
         }
-        return deps.persistOAuthCredential(loginActor, login);
+        return runAsTenant(loginActor, () => deps.persistOAuthCredential(loginActor, login));
       },
     );
 

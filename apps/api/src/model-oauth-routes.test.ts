@@ -1,15 +1,21 @@
+import { randomUUID } from "node:crypto";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import type { PiOAuthConnected } from "@rakazo/adapters";
-import { CHATGPT_OAUTH_PROVIDER, PiOAuthLogins } from "@rakazo/adapters";
+import { CHATGPT_OAUTH_PROVIDER, createSecretStore, PiOAuthLogins } from "@rakazo/adapters";
 import type { Actor } from "@rakazo/contracts";
+import type { DbContext } from "@rakazo/db";
+import { asSystem, bootstrapUserSpace, createDb, currentDbContext, runAsSystem } from "@rakazo/db";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createOpenAiOAuthBindingCookieHeader,
   mountModelOAuthRoutes,
   OPENAI_CODEX_OAUTH_CALLBACK_PATH,
   OPENAI_CODEX_OAUTH_START_PATH,
   resolveOpenAiCallbackRedirectUri,
 } from "./model-oauth-routes.js";
+import type { RouterDeps } from "./router.js";
+import { persistOAuthLoginCredential } from "./router.js";
 
 function extractCookieHeader(setCookieHeader: string | null): string {
   if (!setCookieHeader) return "";
@@ -77,6 +83,7 @@ describe("mountModelOAuthRoutes", () => {
     const persisted: Array<{
       actor: Actor;
       login: PiOAuthConnected;
+      dbContext: DbContext | undefined;
     }> = [];
     let stateCounter = 0;
 
@@ -121,7 +128,7 @@ describe("mountModelOAuthRoutes", () => {
         };
       },
       persistOAuthCredential: async (actor, login) => {
-        persisted.push({ actor, login });
+        persisted.push({ actor, login, dbContext: currentDbContext() });
         return {
           id: "cred-1",
           provider: CHATGPT_OAUTH_PROVIDER,
@@ -213,8 +220,17 @@ describe("mountModelOAuthRoutes", () => {
     expect(callbackRes.status).toBe(200);
     expect(callbackRes.headers.get("cache-control")).toBe("no-store");
     expect(callbackRes.headers.get("referrer-policy")).toBe("no-referrer");
+    const callbackHtml = await callbackRes.text();
+    expect(callbackHtml).toContain("var(--background)");
+    expect(callbackHtml).toContain("var(--foreground)");
+    expect(callbackHtml).toContain("var(--muted-foreground)");
     expect(persisted).toHaveLength(1);
     expect(persisted[0]?.actor).toMatchObject({
+      userId: "user-1",
+      spaceId: "space-1",
+    });
+    expect(persisted[0]?.dbContext).toEqual({
+      kind: "tenant",
       userId: "user-1",
       spaceId: "space-1",
     });
@@ -341,4 +357,140 @@ describe("mountModelOAuthRoutes", () => {
     expect(await failRes.text()).toContain("OpenAI OAuth token exchange failed (HTTP 400).");
     expect(persisted).toHaveLength(0);
   });
+
+  it("accepts a retry started via beginOAuth RPC even when an earlier HTTP binding cookie was set", async () => {
+    const { app, oauthLogins, persisted } = createTestHarness();
+
+    // 1. Start first attempt via HTTP start route (sets cookie for state-token-1).
+    const firstStart = await app.request(
+      `https://rakazo.example.ts.net${OPENAI_CODEX_OAUTH_START_PATH}?spaceId=space-1&format=json`,
+    );
+    expect(firstStart.status).toBe(200);
+    const staleCookie = extractCookieHeader(firstStart.headers.get("set-cookie"));
+
+    // 2. Retry via oauthLogins.begin (as models.beginOAuth RPC does).
+    const secondStarted = await oauthLogins.begin({
+      userId: "user-1",
+      spaceId: "space-1",
+      provider: CHATGPT_OAUTH_PROVIDER,
+      mode: "auth-url",
+      redirectUri: "https://rakazo.example.ts.net/api/oauth/openai-codex/callback",
+    });
+    const secondState = new URL(secondStarted.verificationUri).searchParams.get("state")!;
+    expect(secondState).toBe("state-token-2");
+
+    // Updated cookie created by models.beginOAuth works, and even if the browser still had
+    // staleCookie from the superseded attempt, the active session for the same user/space succeeds.
+    const updatedCookieHeader = createOpenAiOAuthBindingCookieHeader({
+      loginId: secondStarted.loginId,
+      userId: "user-1",
+      spaceId: "space-1",
+      verificationUri: secondStarted.verificationUri,
+      redirectUri: "https://rakazo.example.ts.net/api/oauth/openai-codex/callback",
+      authSecret: "test-signing-secret-placeholder-32chars",
+    });
+    expect(updatedCookieHeader).toContain("rakazo_openai_oauth=");
+
+    const callbackRes = await app.request(
+      `https://rakazo.example.ts.net${OPENAI_CODEX_OAUTH_CALLBACK_PATH}?code=valid-code&state=${secondState}`,
+      { headers: { cookie: staleCookie } },
+    );
+    expect(callbackRes.status).toBe(200);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]?.login.credential.access).toBe("access-for-state-token-2");
+  });
+
+  const databaseUrl = process.env.VERIFY_DATABASE === "1" ? process.env.DATABASE_URL : undefined;
+  it.skipIf(!databaseUrl)(
+    "persists the OAuth credential under tenant RLS scope during the HTTP callback",
+    async () => {
+      const db = createDb(databaseUrl!);
+      const system = asSystem(db.prisma);
+      const userId = randomUUID();
+      let spaceId = "";
+      try {
+        await system.user.create({
+          data: {
+            id: userId,
+            name: "OAuth RLS Tester",
+            email: `oauth-rls-${userId}@example.test`,
+            emailVerified: true,
+          },
+        });
+        ({ spaceId } = await runAsSystem("oauth rls fixture", () =>
+          bootstrapUserSpace(
+            db.prisma,
+            { id: userId },
+            { signupsEnabled: "true", signupAllowlist: "" },
+          ),
+        ));
+
+        const oauthLogins = new PiOAuthLogins(async (_provider, _type, interaction) => {
+          interaction.notify({
+            type: "auth_url",
+            url: `https://auth.openai.com/api/accounts/authorize?response_type=code&client_id=client-placeholder&redirect_uri=${encodeURIComponent("https://rakazo.example.ts.net/api/oauth/openai-codex/callback")}&state=rls-state-1&code_challenge=challenge-1&code_challenge_method=S256`,
+          });
+          await interaction.prompt({
+            type: "manual_code",
+            message: "Complete sign-in in your browser, or paste the callback URL:",
+          });
+          return makeFakeOAuthCredential({ access: "rls-access-token" });
+        });
+
+        const secrets = createSecretStore({ masterKey: "ab".repeat(32) });
+        const app = new Hono();
+        mountModelOAuthRoutes(app, {
+          oauthLogins,
+          authSecret: "test-signing-secret-placeholder-32chars",
+          webOrigin: "https://rakazo.example.ts.net",
+          authenticate: async () => ({
+            authenticatedUser: true,
+            actor: {
+              userId,
+              email: `oauth-rls-${userId}@example.test`,
+              spaceId,
+              role: "owner",
+            },
+          }),
+          persistOAuthCredential: (actor, login) =>
+            persistOAuthLoginCredential(
+              {
+                prisma: db.prisma,
+                secrets,
+                oauthLogins,
+                env: {
+                  defaultProvider: CHATGPT_OAUTH_PROVIDER,
+                  defaultModel: "gpt-5.3-codex",
+                },
+              } as unknown as RouterDeps,
+              actor,
+              login,
+            ),
+        });
+
+        const startRes = await app.request(
+          `https://rakazo.example.ts.net${OPENAI_CODEX_OAUTH_START_PATH}?spaceId=${spaceId}&modelId=gpt-5.3-codex&format=json`,
+        );
+        expect(startRes.status).toBe(200);
+        const cookie = extractCookieHeader(startRes.headers.get("set-cookie"));
+
+        const callbackRes = await app.request(
+          `https://rakazo.example.ts.net${OPENAI_CODEX_OAUTH_CALLBACK_PATH}?code=valid-code&state=rls-state-1&format=json`,
+          { headers: { cookie } },
+        );
+        expect(callbackRes.status).toBe(200);
+        const body = (await callbackRes.json()) as {
+          ok: boolean;
+          credential: { provider: string };
+        };
+        expect(body.ok).toBe(true);
+        expect(body.credential.provider).toBe(CHATGPT_OAUTH_PROVIDER);
+      } finally {
+        if (spaceId) await system.organization.delete({ where: { id: spaceId } });
+        await system.user.deleteMany({ where: { id: userId } });
+        await db.prisma.$disconnect();
+        await db.pool.end();
+      }
+    },
+  );
 });
