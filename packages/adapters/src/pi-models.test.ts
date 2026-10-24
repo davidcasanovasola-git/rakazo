@@ -474,6 +474,17 @@ describe("Pi model catalog", () => {
     expect(label("claude-haiku-4-5")).toBe("Claude Haiku 4.5 (auto-updates)");
     expect(label("claude-haiku-4-5-20251001")).toBe("Claude Haiku 4.5");
   });
+
+  it("advertises both device-code and auth-url sign-in modes for openai-codex", () => {
+    const codex = listPiCatalog().find((entry) => entry.provider === "openai-codex");
+    expect(codex).toMatchObject({
+      provider: "openai-codex",
+      signIn: "device-code",
+      oauthLabel: "Sign in with ChatGPT Plus/Pro",
+      alternateSignIn: "auth-url",
+      alternateOauthLabel: "Sign in with ChatGPT",
+    });
+  });
 });
 
 describe("catalogModelLabel", () => {

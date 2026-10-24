@@ -2000,6 +2000,180 @@ describe("PiOAuthLogins", () => {
       control.logins.abortAll();
       expect(vi.getTimerCount()).toBe(armed - 1);
     });
+
+    it("supports openai-codex auth-url mode with single-use state, user/space binding, expiry, cancellation, and token failure handling", async () => {
+      const actor = { userId: "u-1", spaceId: "s-1" };
+      const logins = new PiOAuthLogins(async (provider, type, interaction) => {
+        expect(provider).toBe(CHATGPT_OAUTH_PROVIDER);
+        expect(type).toBe("oauth");
+        interaction.notify({
+          type: "auth_url",
+          url: "https://auth.openai.com/api/accounts/authorize?response_type=code&client_id=client-placeholder&redirect_uri=https%3A%2F%2Fapp.example.com%2Fapi%2Foauth%2Fopenai-codex%2Fcallback&state=state-123&code_challenge=challenge-123&code_challenge_method=S256",
+        });
+        const pasted = await interaction.prompt({
+          type: "manual_code",
+          message: "Paste the callback URL or authorization code",
+        });
+        if (pasted.includes("fail-exchange")) {
+          throw new Error("OpenAI OAuth token exchange failed (HTTP 400).");
+        }
+        return oauthCred({ access: "siwc-access" });
+      });
+
+      const started = await logins.begin({
+        ...actor,
+        provider: CHATGPT_OAUTH_PROVIDER,
+        mode: "auth-url",
+      });
+      expect(started.mode).toBe("auth-url");
+      expect(started.verificationUri).toContain("https://auth.openai.com/api/accounts/authorize");
+      expect(started.expiresInSeconds).toBe(600);
+
+      // Invalid state is rejected.
+      await expect(
+        logins.completeCallback(
+          {
+            ...actor,
+            provider: CHATGPT_OAUTH_PROVIDER,
+            state: "unknown-state",
+            code: "code-1",
+          },
+          async () => "saved",
+        ),
+      ).resolves.toEqual({
+        status: "error",
+        code: "invalid_state",
+        error: "Invalid OAuth state. Start sign-in again.",
+      });
+
+      // Wrong user or space is rejected without consuming the valid state.
+      await expect(
+        logins.completeCallback(
+          {
+            userId: "other-user",
+            spaceId: "s-1",
+            provider: CHATGPT_OAUTH_PROVIDER,
+            state: "state-123",
+            code: "code-1",
+          },
+          async () => "saved",
+        ),
+      ).resolves.toEqual({
+        status: "error",
+        code: "forbidden",
+        error: "OAuth session belongs to a different account or space.",
+      });
+
+      // Valid callback succeeds and returns the persisted credential value.
+      const completed = await logins.completeCallback(
+        {
+          ...actor,
+          provider: CHATGPT_OAUTH_PROVIDER,
+          state: "state-123",
+          code: "code-1",
+        },
+        async (login) => ({ access: login.credential.access }),
+      );
+      expect(completed).toEqual({
+        status: "connected",
+        loginId: started.loginId,
+        spaceId: "s-1",
+        value: { access: "siwc-access" },
+      });
+
+      // Repeated callback with the same state is rejected as single-use.
+      await expect(
+        logins.completeCallback(
+          {
+            ...actor,
+            provider: CHATGPT_OAUTH_PROVIDER,
+            state: "state-123",
+            code: "code-1",
+          },
+          async () => "saved",
+        ),
+      ).resolves.toEqual({
+        status: "error",
+        code: "replayed_state",
+        error: "OAuth callback has already been used.",
+      });
+    });
+
+    it("rejects expired, cancelled, and failed-exchange openai-codex auth-url callbacks", async () => {
+      vi.useFakeTimers();
+      const actor = { userId: "u-1", spaceId: "s-1" };
+      let stateCounter = 0;
+      const logins = new PiOAuthLogins(async (_provider, _type, interaction) => {
+        stateCounter += 1;
+        interaction.notify({
+          type: "auth_url",
+          url: `https://auth.openai.com/api/accounts/authorize?state=state-${stateCounter}`,
+        });
+        const pasted = await interaction.prompt({
+          type: "manual_code",
+          message: "Paste the callback URL or authorization code",
+        });
+        if (pasted.includes("fail-exchange")) {
+          throw new Error("OpenAI OAuth token exchange failed (HTTP 400).");
+        }
+        return oauthCred();
+      });
+
+      // 1. Cancellation via provider error parameter.
+      await logins.begin({ ...actor, provider: CHATGPT_OAUTH_PROVIDER, mode: "auth-url" });
+      await expect(
+        logins.completeCallback(
+          {
+            ...actor,
+            provider: CHATGPT_OAUTH_PROVIDER,
+            state: "state-1",
+            error: "access_denied",
+          },
+          async () => "saved",
+        ),
+      ).resolves.toEqual({
+        status: "error",
+        code: "provider_error",
+        error: "ChatGPT sign-in was cancelled or denied.",
+      });
+
+      // 2. Expired state.
+      await logins.begin({ ...actor, provider: CHATGPT_OAUTH_PROVIDER, mode: "auth-url" });
+      vi.advanceTimersByTime(601_000);
+      await expect(
+        logins.completeCallback(
+          {
+            ...actor,
+            provider: CHATGPT_OAUTH_PROVIDER,
+            state: "state-2",
+            code: "code-2",
+          },
+          async () => "saved",
+        ),
+      ).resolves.toEqual({
+        status: "error",
+        code: "expired_state",
+        error: "OAuth state has expired. Start sign-in again.",
+      });
+
+      // 3. Token exchange failure.
+      await logins.begin({ ...actor, provider: CHATGPT_OAUTH_PROVIDER, mode: "auth-url" });
+      await expect(
+        logins.completeCallback(
+          {
+            ...actor,
+            provider: CHATGPT_OAUTH_PROVIDER,
+            state: "state-3",
+            code: "fail-exchange",
+          },
+          async () => "saved",
+        ),
+      ).resolves.toEqual({
+        status: "error",
+        code: "exchange_failed",
+        error: "OpenAI OAuth token exchange failed (HTTP 400).",
+      });
+    });
   });
 });
 

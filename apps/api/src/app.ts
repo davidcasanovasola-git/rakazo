@@ -142,9 +142,10 @@ import {
 } from "./messaging-inbound.js";
 import { createMessagingReceipts } from "./messaging-receipts.js";
 import { mountMessagingWebhookRoutes } from "./messaging-webhook.js";
+import { mountModelOAuthRoutes } from "./model-oauth-routes.js";
 import { monitoringRoutes } from "./monitoring.js";
 import { mountApiRequestBodyLimits } from "./request-body-limit.js";
-import { createRouter } from "./router.js";
+import { createRouter, persistOAuthLoginCredential } from "./router.js";
 import { mountScreenTarget } from "./screen-proxy.js";
 import { createAuthResponseAudit } from "./security-audit.js";
 import { isDeferredReservationLost, TeamChatBridge } from "./team-chat-bridge.js";
@@ -766,16 +767,94 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     sandboxProvider: env.sandboxProvider,
     prisma,
   });
-  const requestSession = async (request: Request) => {
+  const requestSession = async (request: Request, spaceIdOverride?: string | null) => {
     // The bearer plugin turns a signed `Authorization: Bearer` into the session cookie.
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session?.user) return null;
+    const requestedSpaceId =
+      spaceIdOverride !== undefined ? spaceIdOverride : request.headers.get("x-rakazo-space-id");
     const actor = await actorFromMembership(
-      requireMembership(prisma, session.user.id, request.headers.get("x-rakazo-space-id")),
+      requireMembership(prisma, session.user.id, requestedSpaceId),
     );
-    return actor && { actor, sessionId: session.session.id };
+    return {
+      actor,
+      sessionId: session.session.id,
+      userId: session.user.id,
+    };
   };
   const sessionActor = async (request: Request) => (await requestSession(request))?.actor ?? null;
+  mountModelOAuthRoutes(app, {
+    oauthLogins,
+    authSecret: env.authSecret,
+    webOrigin: env.webOrigin,
+    authenticate: async (request, spaceIdOverride) => {
+      const session = await requestSession(request, spaceIdOverride);
+      if (!session) return { actor: null, authenticatedUser: false };
+      if (session.actor) {
+        enrichLogContext({ "user.id": session.actor.userId, "space.id": session.actor.spaceId });
+      }
+      return { actor: session.actor, authenticatedUser: true };
+    },
+    persistOAuthCredential: (actor, login) =>
+      persistOAuthLoginCredential(
+        {
+          analytics,
+          cloudAgent,
+          codexCatalog,
+          prisma,
+          pushTokens,
+          events,
+          ticketChanges,
+          boardEvents,
+          auth,
+          jobs,
+          sandbox,
+          memory,
+          memoryProviders,
+          home,
+          secrets,
+          oauthLogins,
+          integrationSettings,
+          mcpOAuth,
+          mcp,
+          composio: stack.composio,
+          connectors: stack.connector,
+          remoteConnectors,
+          modelConnectionFetch,
+          artifacts,
+          dataDir: env.dataDir,
+          billing,
+          messaging: {
+            enabled: Boolean(messaging),
+            providers: messaging?.platforms().map((platform) => platform.provider) ?? [],
+            openSignup: env.messagingOpenSignup,
+          },
+          env: {
+            phoneCallsEnabled: env.phoneCallsEnabled,
+            phoneCallRingSeconds: env.phoneCallRingSeconds,
+            ticketBoardEnabled,
+            agentRuntime: env.agentRuntime,
+            defaultProvider: env.defaultProvider,
+            defaultModel: env.defaultModel,
+            teamChatJudgeProvider: env.teamChatJudgeProvider,
+            teamChatJudgeModel: env.teamChatJudgeModel,
+            deploymentModelConfigured: env.deploymentModelConfigured,
+            deploymentModelHostCredentials: env.deploymentModelHostCredentials,
+            webOrigin: env.webOrigin,
+            privacyPolicyUrl: env.privacyPolicyUrl,
+            screenProxySecret: env.screenProxySecret,
+            sandboxProvider: env.sandboxProvider,
+            gitSha: env.gitSha,
+            integrationsCatalogUrl: env.integrationsCatalogUrl,
+            mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
+            desktopHostChoiceEnabled: Boolean(env.desktopStackToken),
+          },
+        },
+        actor,
+        login,
+        codexCatalog,
+      ),
+  });
   app.use(
     "/rpc/*",
     clientBuildMiddleware({
@@ -793,8 +872,9 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       prefix: "/rpc",
       context: {
         actor,
-        sessionId: session?.sessionId,
+        sessionId: actor ? session?.sessionId : undefined,
         signal: c.req.raw.signal,
+        request: c.req.raw,
         // Same user in the same space, so leaving the space also ends a stream.
         // A database failure rejects this check; only a missing membership is unauthorized.
         stillAuthorized: async () => {

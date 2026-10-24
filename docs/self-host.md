@@ -639,6 +639,21 @@ leave Rakazo through this URL. Leave `RAKAZO_LOCAL_MODELS` blank to disable the 
 
 In **Settings → Models**, choose **Ollama Cloud**, paste an API key from ollama.com, then **Find models**. This uses an OpenAI-compatible connection with no environment configuration. `ollama.com` is the only public host allowed without `RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC=1`.
 
+### ChatGPT OAuth sign-in (Authorization Code + PKCE)
+
+`openai-codex` supports both device-code sign-in (**Sign in with ChatGPT Plus/Pro**) and the OpenAI OAuth 2.0 Authorization Code flow with PKCE (**Sign in with ChatGPT**). Device-code sign-in needs no server configuration. To enable the authorization-URL flow with a registered OpenAI OAuth client, set:
+
+```env
+OPENAI_OAUTH_CLIENT_ID=replace-with-openai-oauth-client-id
+# Optional; set only for confidential OAuth clients:
+OPENAI_OAUTH_CLIENT_SECRET=replace-with-openai-oauth-client-secret
+# Optional; defaults to http://localhost:1455/auth/callback for paste-back or desktop capture,
+# or https://<your-host>/api/oauth/openai-codex/callback for direct HTTPS callbacks:
+OPENAI_OAUTH_REDIRECT_URI=https://app.example.com/api/oauth/openai-codex/callback
+```
+
+For remote HTTPS deployments—including Tailscale Serve (`https://rakazo.example.ts.net`) and reverse proxies forwarding `X-Forwarded-Proto: https` and `X-Forwarded-Host`—register `https://<your-host>/api/oauth/openai-codex/callback` with OpenAI and set `OPENAI_OAUTH_REDIRECT_URI` (or `WEB_ORIGIN`) to match. If the redirect URI is a loopback callback that does not load in the user's browser on a remote VM, the user can copy the final callback URL or `code` parameter from the browser address bar and paste it into Rakazo to finish signing in.
+
 Each user can also connect their own OpenAI-compatible endpoint from **Connect a model** /
 **Settings → Models** on web and mobile. Choose **OpenAI-compatible**, enter the server base URL
 (for example `http://127.0.0.1:8000/v1`), the exact model id, and an optional API key.

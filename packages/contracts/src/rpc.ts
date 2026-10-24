@@ -73,6 +73,7 @@ import {
   ModelCredentialSchema,
   ModelCreditAmountSchema,
   ModelOAuthBeginSchema,
+  ModelOAuthSignInModeSchema,
   OPENAI_COMPATIBLE_PROVIDER_ID,
   REPLY_QUOTE_MAX_LENGTH,
   ReorderBotsInput,
@@ -290,6 +291,7 @@ export const appContract = {
       .input(
         z.object({
           provider: z.string(),
+          mode: ModelOAuthSignInModeSchema.optional(),
           label: z.string().optional(),
           modelId: z.string().optional(),
           thinkingLevel: ThinkingLevelSchema.nullable().optional(),

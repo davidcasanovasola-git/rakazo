@@ -12,6 +12,16 @@ import { CompatibleKeyField } from "./compatible-key-field";
 
 import type { ModelSettingsState } from "./use-model-settings";
 
+function oauthCallbackPlaceholder(verificationUri: string): string {
+  try {
+    const redirectUri = new URL(verificationUri).searchParams.get("redirect_uri");
+    if (redirectUri) return `${redirectUri}?code=…`;
+  } catch {
+    // Fall back to default loopback placeholder.
+  }
+  return "http://localhost:53692/callback?code=…";
+}
+
 export function ConnectionControls({
   acceptsKey,
   accountId,
@@ -137,7 +147,7 @@ export function ConnectionControls({
                       aria-label={t`Authorization code or callback URL`}
                       autoComplete="off"
                       spellCheck={false}
-                      placeholder="http://localhost:53692/callback?code=…"
+                      placeholder={oauthCallbackPlaceholder(oauth.verificationUri)}
                       className="text-foreground md:text-[13px]"
                     />
                     <Button
@@ -227,21 +237,34 @@ export function ConnectionControls({
               </Button>
             </div>
           ) : (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={busy}
-              onClick={() => beginSelectedSubscriptionSignIn()}
-            >
-              {oauthPending ? (
-                <Trans>Starting…</Trans>
-              ) : credential?.authKind === "oauth" ? (
-                <Trans>Sign in again</Trans>
-              ) : (
-                (selected?.oauthLabel ?? t`Sign in`)
-              )}
-            </Button>
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                onClick={() => beginSelectedSubscriptionSignIn()}
+              >
+                {oauthPending ? (
+                  <Trans>Starting…</Trans>
+                ) : credential?.authKind === "oauth" ? (
+                  <Trans>Sign in again</Trans>
+                ) : (
+                  (selected?.oauthLabel ?? t`Sign in`)
+                )}
+              </Button>
+              {selected?.alternateSignIn ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => beginSelectedSubscriptionSignIn(selected.alternateSignIn)}
+                >
+                  {selected.alternateOauthLabel ?? t`Sign in`}
+                </Button>
+              ) : null}
+            </>
           )}
           <Button
             type="button"

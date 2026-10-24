@@ -34,6 +34,7 @@ import type {
   McpConnector,
   McpOAuthSummary,
   MemoryProviderResolver,
+  PiOAuthConnected,
   PiOAuthLogins,
   ProviderCatalogCache,
   PushTokenStore,
@@ -294,6 +295,7 @@ import {
   serializeSpaceMemoryConfig,
   updateMemoryProviderDefaultScope,
 } from "./memory-provider-config.js";
+import { resolveOpenAiCallbackRedirectUri } from "./model-oauth-routes.js";
 import {
   chooseFocus,
   dismissFocus,
@@ -974,6 +976,7 @@ export function createRouter(deps: RouterDeps) {
     /** The signed-in session, so a push token ends with the session that registered it. */
     sessionId?: string;
     signal?: AbortSignal;
+    request?: Request;
     /** Re-runs the request's auth so a long-lived stream notices sign-out and revocation. */
     stillAuthorized?: () => Promise<boolean>;
   }>();
@@ -1717,18 +1720,49 @@ export function createRouter(deps: RouterDeps) {
         }
       }),
       beginOAuth: authed.models.beginOAuth.handler(async ({ context, input }) => {
-        return deps.oauthLogins.begin({
-          userId: context.actor.userId,
-          spaceId: context.actor.spaceId,
-          provider: input.provider,
-          modelId: input.modelId,
-          thinkingLevel: input.thinkingLevel,
-          label: input.label,
-          signal: context.signal,
-        });
+        let redirectUri: string | undefined;
+        if (input.provider === CHATGPT_OAUTH_PROVIDER && input.mode === "auth-url") {
+          try {
+            redirectUri = resolveOpenAiCallbackRedirectUri({
+              request: context.request,
+              webOrigin: deps.env.webOrigin,
+            });
+          } catch (error) {
+            throw new ORPCError("BAD_REQUEST", {
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Invalid OpenAI OAuth redirect URI configuration.",
+            });
+          }
+        }
+        try {
+          return await deps.oauthLogins.begin({
+            userId: context.actor.userId,
+            spaceId: context.actor.spaceId,
+            provider: input.provider,
+            mode: input.mode,
+            redirectUri,
+            modelId: input.modelId,
+            thinkingLevel: input.thinkingLevel,
+            label: input.label,
+            signal: context.signal,
+          });
+        } catch (error) {
+          throw new ORPCError("BAD_REQUEST", {
+            message: error instanceof Error ? error.message : "Could not start sign-in.",
+          });
+        }
       }),
       submitOAuthCode: authed.models.submitOAuthCode.handler(async ({ context, input }) => {
-        return deps.oauthLogins.submit(input.loginId, context.actor, input.code);
+        try {
+          return deps.oauthLogins.submit(input.loginId, context.actor, input.code);
+        } catch (error) {
+          throw new ORPCError("BAD_REQUEST", {
+            message:
+              error instanceof Error ? error.message : "Could not submit authorization code.",
+          });
+        }
       }),
       completeOAuth: authed.models.completeOAuth.handler(async ({ context, input }) => {
         const result = await deps.oauthLogins.complete(input.loginId, {
@@ -1739,26 +1773,8 @@ export function createRouter(deps: RouterDeps) {
       }),
       finishOAuth: authed.models.finishOAuth.handler(async ({ context, input }) => {
         throwIfAborted(context.signal);
-        const result = await deps.oauthLogins.finish(
-          input.loginId,
-          context.actor,
-          async (login) => {
-            return persistModelCredential(
-              deps,
-              context.actor,
-              {
-                provider: login.provider,
-                plaintext: serializeModelSecret({ kind: "oauth", credential: login.credential }),
-                label:
-                  login.label ??
-                  listPiCatalog().find((entry) => entry.provider === login.provider)?.providerName,
-                modelId: login.modelId,
-                thinkingLevel: login.thinkingLevel,
-                signal: login.signal,
-              },
-              codexCatalog,
-            );
-          },
+        const result = await deps.oauthLogins.finish(input.loginId, context.actor, async (login) =>
+          persistOAuthLoginCredential(deps, context.actor, login, codexCatalog),
         );
         if (result.status === "pending") {
           throw new ORPCError("CONFLICT", { message: "Sign-in has not finished yet." });
@@ -7419,6 +7435,29 @@ function computerHostFor(
   if (sandboxProvider !== "docker") return null;
   if (stored === "this-mac" || stored === "docker") return stored;
   return null;
+}
+
+export async function persistOAuthLoginCredential(
+  deps: RouterDeps,
+  actor: Actor,
+  login: PiOAuthConnected,
+  codexCatalog: CodexLiveCatalog = deps.codexCatalog ?? new CodexCatalogCache(),
+) {
+  return persistModelCredential(
+    deps,
+    actor,
+    {
+      provider: login.provider,
+      plaintext: serializeModelSecret({ kind: "oauth", credential: login.credential }),
+      label:
+        login.label ??
+        listPiCatalog().find((entry) => entry.provider === login.provider)?.providerName,
+      modelId: login.modelId,
+      thinkingLevel: login.thinkingLevel,
+      signal: login.signal,
+    },
+    codexCatalog,
+  );
 }
 
 async function persistModelCredential(

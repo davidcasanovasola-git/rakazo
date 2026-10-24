@@ -1349,6 +1349,8 @@ export const ModelCatalogEntrySchema = z.object({
   authHint: z.string().optional(),
   subscription: z.boolean().optional(),
   signIn: ModelOAuthSignInModeSchema.optional(),
+  alternateSignIn: ModelOAuthSignInModeSchema.optional(),
+  alternateOauthLabel: z.string().trim().min(1).max(160).optional(),
   reasoning: z.boolean().optional(),
   thinkingLevels: z.array(ThinkingLevelSchema).optional(),
   /** The model reads images. Left out where a connection setting decides it. */

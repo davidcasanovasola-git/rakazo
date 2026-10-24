@@ -3,6 +3,7 @@ import type {
   ModelBackupChoice,
   ModelHeaderRow,
   ModelOAuthBegin,
+  ModelOAuthSignInMode,
   ThinkingLevel,
 } from "@rakazo/contracts";
 
@@ -808,7 +809,7 @@ export default function Models() {
     });
   }
 
-  async function startSubscriptionSignIn() {
+  async function startSubscriptionSignIn(mode?: ModelOAuthSignInMode) {
     if (!selected) return;
     clearFeedback();
     setOauthPending(true);
@@ -820,6 +821,7 @@ export default function Models() {
         "models/beginOAuth",
         {
           provider: selected.provider,
+          ...(mode ? { mode } : {}),
           modelId: selected.id,
           thinkingLevel: clampCatalogThinkingLevel(
             thinkingLevel,
@@ -1487,20 +1489,32 @@ export default function Models() {
               />
             </View>
           ) : (
-            <NativeActionButton
-              disabled={busy}
-              fill
-              label={
-                oauthPending
-                  ? t("Starting…")
-                  : credential
-                    ? t("Sign in again")
-                    : (selected.oauthLabel ?? t("Sign in"))
-              }
-              onPress={() => void startSubscriptionSignIn()}
-              prominence="secondary"
-              style={{ marginTop: 12 }}
-            />
+            <>
+              <NativeActionButton
+                disabled={busy}
+                fill
+                label={
+                  oauthPending
+                    ? t("Starting…")
+                    : credential
+                      ? t("Sign in again")
+                      : (selected.oauthLabel ?? t("Sign in"))
+                }
+                onPress={() => void startSubscriptionSignIn()}
+                prominence="secondary"
+                style={{ marginTop: 12 }}
+              />
+              {selected.alternateSignIn ? (
+                <NativeActionButton
+                  disabled={busy}
+                  fill
+                  label={selected.alternateOauthLabel ?? t("Sign in")}
+                  onPress={() => void startSubscriptionSignIn(selected.alternateSignIn)}
+                  prominence="secondary"
+                  style={{ marginTop: 12 }}
+                />
+              ) : null}
+            </>
           )
         ) : null}
         {acceptsKey || isCloudflare ? (

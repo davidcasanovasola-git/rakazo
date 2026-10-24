@@ -26,6 +26,8 @@ export type PiCatalogEntry = {
   authHint?: string;
   subscription: boolean;
   signIn?: ModelOAuthSignInMode;
+  alternateSignIn?: ModelOAuthSignInMode;
+  alternateOauthLabel?: string;
   reasoning?: boolean;
   thinkingLevels?: ThinkingLevel[];
   /** The model reads images. Left out where a connection setting decides it. */
@@ -226,6 +228,10 @@ function buildPiCatalog(): PiCatalogEntry[] {
           provider.id === OPENAI_COMPATIBLE_PROVIDER_ID ? "Custom server" : signInMeta?.hint,
         subscription,
         signIn: signInMeta?.mode,
+        ...(signInMeta?.alternateMode ? { alternateSignIn: signInMeta.alternateMode } : {}),
+        ...(signInMeta?.alternateLoginLabel
+          ? { alternateOauthLabel: signInMeta.alternateLoginLabel }
+          : {}),
         reasoning: Boolean(model.reasoning),
         thinkingLevels,
         // Compatibility metadata does not prove a model is served by a user's

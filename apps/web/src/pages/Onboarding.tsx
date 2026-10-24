@@ -1,5 +1,5 @@
 import { Plural, Trans, useLingui } from "@lingui/react/macro";
-import type { ModelHeaderRow, ThinkingLevel } from "@rakazo/contracts";
+import type { ModelHeaderRow, ModelOAuthSignInMode, ThinkingLevel } from "@rakazo/contracts";
 import {
   CLOUDFLARE_AI_GATEWAY_PROVIDER_ID,
   cloudflareModelRouting,
@@ -503,10 +503,11 @@ export function OnboardingPage() {
     }
   }
 
-  function beginSelectedSubscriptionSignIn() {
+  function beginSelectedSubscriptionSignIn(mode?: ModelOAuthSignInMode) {
     if (!selected?.id) return;
     void startSubscriptionSignIn({
       provider: selected.provider,
+      mode,
       modelId: selected.id,
       label: selected.providerName ?? selected.provider,
     });
@@ -814,7 +815,17 @@ export function OnboardingPage() {
                                 aria-label={t`Authorization code or callback URL`}
                                 autoComplete="off"
                                 spellCheck={false}
-                                placeholder="http://localhost:53692/callback?code=…"
+                                placeholder={(() => {
+                                  try {
+                                    const redirectUri = new URL(
+                                      oauth.verificationUri,
+                                    ).searchParams.get("redirect_uri");
+                                    if (redirectUri) return `${redirectUri}?code=…`;
+                                  } catch {
+                                    // Fall back to default loopback placeholder.
+                                  }
+                                  return "http://localhost:53692/callback?code=…";
+                                })()}
                               />
                               <Button
                                 disabled={!pasteCode.trim()}
@@ -898,12 +909,25 @@ export function OnboardingPage() {
                         </Button>
                       </div>
                     ) : (
-                      <Button
-                        disabled={oauthPending}
-                        onClick={() => beginSelectedSubscriptionSignIn()}
-                      >
-                        {oauthPending ? <Trans>Starting…</Trans> : signInLabel}
-                      </Button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          disabled={oauthPending}
+                          onClick={() => beginSelectedSubscriptionSignIn()}
+                        >
+                          {oauthPending ? <Trans>Starting…</Trans> : signInLabel}
+                        </Button>
+                        {selected?.alternateSignIn ? (
+                          <Button
+                            variant="outline"
+                            disabled={oauthPending}
+                            onClick={() =>
+                              beginSelectedSubscriptionSignIn(selected.alternateSignIn)
+                            }
+                          >
+                            {selected.alternateOauthLabel ?? t`Sign in`}
+                          </Button>
+                        ) : null}
+                      </div>
                     )}
                   </div>
                 ) : null}

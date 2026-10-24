@@ -1,5 +1,5 @@
 import { useLingui } from "@lingui/react/macro";
-import type { Me, ModelHeaderRow, ThinkingLevel } from "@rakazo/contracts";
+import type { Me, ModelHeaderRow, ModelOAuthSignInMode, ThinkingLevel } from "@rakazo/contracts";
 import {
   CLOUDFLARE_AI_GATEWAY_PROVIDER_ID,
   cloudflareModelRouting,
@@ -692,11 +692,12 @@ export function useModelSettings(onClose: () => void) {
     onClose();
   }
 
-  function beginSelectedSubscriptionSignIn() {
+  function beginSelectedSubscriptionSignIn(mode?: ModelOAuthSignInMode) {
     if (!selected) return;
     setNotice(null);
     void startSubscriptionSignIn({
       provider: selected.provider,
+      mode,
       modelId: selected.id,
       thinkingLevel: clampCatalogThinkingLevel(
         thinkingLevel,

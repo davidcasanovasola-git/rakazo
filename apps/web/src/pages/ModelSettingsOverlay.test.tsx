@@ -250,6 +250,7 @@ beforeEach(() => {
   models.credentials.mockResolvedValue([]);
   models.connect.mockResolvedValue({});
   models.disconnect.mockResolvedValue(undefined);
+  models.cancelOAuth.mockResolvedValue({ ok: true });
 });
 
 afterEach(() => {
@@ -1114,6 +1115,70 @@ it("folds the key form behind Or paste an API key once a subscription is signed 
     expect(keyField(view.container)).toBeTruthy();
     expect(buttons(view.container, "Connect API key")).toHaveLength(1);
     expect(view.container.textContent).not.toContain("Replace API key");
+  } finally {
+    await view.unmount();
+  }
+});
+
+it("offers Sign in with ChatGPT (auth-url) alongside device-code for openai-codex", async () => {
+  vi.stubGlobal(
+    "open",
+    vi.fn(() => null),
+  );
+  vi.mocked(rpc.me).mockResolvedValue(account("openai-codex", "fixture-model"));
+  models.list.mockResolvedValue([
+    {
+      provider: "openai-codex",
+      providerName: "ChatGPT",
+      id: "fixture-model",
+      label: "Fixture model",
+      billing: "Subscription",
+      auth: "oauth",
+      signIn: "device-code",
+      oauthLabel: "Sign in with ChatGPT Plus/Pro",
+      alternateSignIn: "auth-url",
+      alternateOauthLabel: "Sign in with ChatGPT",
+    },
+  ]);
+  models.credentials.mockResolvedValue([]);
+  models.beginOAuth.mockResolvedValue({
+    mode: "auth-url",
+    loginId: "login-siwc-1",
+    verificationUri:
+      "https://auth.openai.com/api/accounts/authorize?response_type=code&client_id=client-placeholder&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=state-1&code_challenge=challenge-1&code_challenge_method=S256",
+    expiresInSeconds: 600,
+  });
+
+  const view = await renderSettings();
+  try {
+    expect(buttons(view.container, "Sign in with ChatGPT Plus/Pro")).toHaveLength(1);
+    const siwcButton = buttons(view.container, "Sign in with ChatGPT").find(
+      (btn) => btn.textContent === "Sign in with ChatGPT",
+    );
+    expect(siwcButton).toBeDefined();
+
+    await act(async () => {
+      siwcButton?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(models.beginOAuth).toHaveBeenCalledWith(
+      {
+        provider: "openai-codex",
+        mode: "auth-url",
+        modelId: "fixture-model",
+        thinkingLevel: null,
+        label: "ChatGPT",
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    const callbackInput = view.container.querySelector<HTMLInputElement>(
+      'input[aria-label="Authorization code or callback URL"]',
+    );
+    expect(callbackInput).toBeTruthy();
+    expect(callbackInput?.placeholder).toBe("http://localhost:1455/auth/callback?code=…");
   } finally {
     await view.unmount();
   }

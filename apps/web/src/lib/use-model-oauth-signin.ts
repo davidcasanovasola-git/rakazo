@@ -1,4 +1,4 @@
-import type { ModelOAuthBegin, ThinkingLevel } from "@rakazo/contracts";
+import type { ModelOAuthBegin, ModelOAuthSignInMode, ThinkingLevel } from "@rakazo/contracts";
 import { cancelModelOAuthAttempt, finishModelOAuthAttempt } from "@rakazo/core";
 import { useEffect, useRef, useState } from "react";
 import { desktopBridge, oauthStateOf, onDesktopOAuthCallback } from "./desktop";
@@ -8,6 +8,7 @@ import { errorText } from "./user-error";
 
 export type ModelOAuthSignInBegin = {
   provider: string;
+  mode?: ModelOAuthSignInMode;
   modelId?: string;
   thinkingLevel?: ThinkingLevel | null;
   label?: string;
@@ -133,6 +134,7 @@ export function useModelOAuthSignIn(options: {
       const started = await rpc.models.beginOAuth(
         {
           provider: begin.provider,
+          ...(begin.mode ? { mode: begin.mode } : {}),
           modelId: begin.modelId,
           thinkingLevel: begin.thinkingLevel,
           label: begin.label,
@@ -147,10 +149,33 @@ export function useModelOAuthSignIn(options: {
         // Subscribe before the popup exists: a provider that is already
         // authorized can redirect before React commits the state above.
         releaseOAuthCapture();
-        oauthCaptureRef.current = onDesktopOAuthCallback(
+        const releaseDesktop = onDesktopOAuthCallback(
           (code) => void submitOAuthCode(code, started),
           oauthStateOf(started.verificationUri),
         );
+        const channel =
+          typeof BroadcastChannel === "function"
+            ? new BroadcastChannel("rakazo:model-oauth")
+            : null;
+        if (channel) {
+          channel.onmessage = (event: MessageEvent) => {
+            const payload = event.data as { type?: unknown; loginId?: unknown } | null;
+            if (
+              payload?.type === "completed" &&
+              payload.loginId === started.loginId &&
+              !controller.signal.aborted
+            ) {
+              releaseOAuthCapture();
+              void finishSubscriptionSignIn(started.loginId, controller).finally(() => {
+                finishModelOAuthAttempt(oauthAbortRef, controller, () => setOauthPending(false));
+              });
+            }
+          };
+        }
+        oauthCaptureRef.current = () => {
+          releaseDesktop();
+          channel?.close();
+        };
       }
       const browserAuth = desktopBridge()?.oauth;
       if (browserAuth?.open) {

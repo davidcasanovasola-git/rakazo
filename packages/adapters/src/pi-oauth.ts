@@ -28,6 +28,13 @@ import {
 import type { PrismaClient } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { createManualAnthropicOAuthLogin } from "./pi-anthropic-oauth.js";
+import {
+  createOpenAiChatGptOAuthLogin,
+  OPENAI_OAUTH_STATE_TTL_SECONDS,
+  parseOpenAiAuthorizationInput,
+  refreshOpenAiChatGptOAuthToken,
+  timingSafeEqualStrings,
+} from "./pi-openai-chatgpt-oauth.js";
 
 export const CHATGPT_OAUTH_PROVIDER = "openai-codex";
 export const COPILOT_OAUTH_PROVIDER = "github-copilot";
@@ -39,6 +46,8 @@ export const SUBSCRIPTION_SIGN_IN_PROVIDERS: Record<
   {
     mode: ModelOAuthSignInMode;
     loginLabel: string;
+    alternateMode?: ModelOAuthSignInMode;
+    alternateLoginLabel?: string;
     hint: string;
     billing: string;
   }
@@ -46,6 +55,8 @@ export const SUBSCRIPTION_SIGN_IN_PROVIDERS: Record<
   [CHATGPT_OAUTH_PROVIDER]: {
     mode: "device-code",
     loginLabel: "Sign in with ChatGPT Plus/Pro",
+    alternateMode: "auth-url",
+    alternateLoginLabel: "Sign in with ChatGPT",
     hint: "ChatGPT Plus/Pro",
     billing:
       "Sign in with ChatGPT Plus or Pro. Uses your OpenAI subscription. Rakazo does not pay.",
@@ -314,13 +325,56 @@ export type PiOAuthBegin = ModelOAuthBegin;
 type WithoutLogin<T> = T extends unknown ? Omit<T, "loginId" | "provider"> : never;
 type PiOAuthStarted = WithoutLogin<PiOAuthBegin>;
 
+type LoginOptions = {
+  mode?: ModelOAuthSignInMode;
+  redirectUri?: string;
+};
+
 type LoginFn = (
   providerId: string,
   type: "oauth",
   interaction: AuthInteraction,
+  options?: LoginOptions,
 ) => Promise<Credential>;
 
 type SessionState = "pending" | "ready" | "finalizing" | "consumed";
+
+type RecordedOAuthState = {
+  loginId: string;
+  userId: string;
+  spaceId: string;
+  provider: string;
+  at: number;
+};
+
+type PersistedOAuthResult = {
+  userId: string;
+  spaceId: string;
+  provider: string;
+  value: unknown;
+  at: number;
+};
+
+export type PiOAuthCallbackResult<T> =
+  | {
+      status: "connected";
+      loginId: string;
+      spaceId: string;
+      value: T;
+    }
+  | {
+      status: "error";
+      code:
+        | "missing_state"
+        | "invalid_state"
+        | "expired_state"
+        | "replayed_state"
+        | "cancelled"
+        | "forbidden"
+        | "provider_error"
+        | "exchange_failed";
+      error: string;
+    };
 
 type Session = {
   id: string;
@@ -328,11 +382,14 @@ type Session = {
   userId: string;
   spaceId: string;
   provider: string;
+  mode: ModelOAuthSignInMode;
   modelId?: string;
   thinkingLevel?: string | null;
   label?: string;
   abort: AbortController;
   state: SessionState;
+  oauthState?: string;
+  done?: Promise<OAuthCredential>;
   credential?: OAuthCredential;
   error?: string;
   finishing?: Promise<void>;
@@ -581,7 +638,22 @@ export function codexComputeResidency(accessToken: string | undefined): string |
 export function loadProviderOAuth(providerId: string): OAuthAuth | undefined {
   // pi 1.3 adds ChatGPT OAuth to OpenAI; keep subscription sign-in on Codex.
   if (providerId === "openai") return undefined;
-  return providerCatalog().getProvider(canonicalPiProviderId(providerId))?.auth.oauth;
+  const canonical = canonicalPiProviderId(providerId);
+  const base = providerCatalog().getProvider(canonical)?.auth.oauth;
+  if (!base) return undefined;
+  if (canonical !== CHATGPT_OAUTH_PROVIDER) return base;
+  return {
+    ...base,
+    async refresh(credential, signal) {
+      if (
+        credential.oauthFlow === "siwc" ||
+        (typeof credential.clientId === "string" && credential.clientId.trim().length > 0)
+      ) {
+        return refreshOpenAiChatGptOAuthToken(credential, signal);
+      }
+      return base.refresh(credential, signal);
+    },
+  };
 }
 
 let cachedProviderCatalog: ReturnType<typeof builtinModels> | undefined;
@@ -829,8 +901,16 @@ export function kickModelCredentialRefresh(
   credentialRefreshKicks.set(secretId, kick);
 }
 
+const MAX_RECORDED_OAUTH_STATES = 512;
+const RECORDED_OAUTH_STATE_TTL_MS = 30 * 60 * 1000;
+
 export class PiOAuthLogins {
   private readonly pending = new Map<string, Session>();
+  private readonly pendingByOAuthState = new Map<string, Session>();
+  private readonly consumedStates = new Map<string, RecordedOAuthState>();
+  private readonly expiredStates = new Map<string, RecordedOAuthState>();
+  private readonly cancelledStates = new Map<string, RecordedOAuthState>();
+  private readonly persistedByLoginId = new Map<string, PersistedOAuthResult>();
   private readonly activeByScope = new Map<string, Session>();
   private readonly replacementTails = new Map<string, Promise<void>>();
 
@@ -840,15 +920,22 @@ export class PiOAuthLogins {
     userId: string;
     spaceId: string;
     provider: string;
+    mode?: ModelOAuthSignInMode;
+    redirectUri?: string;
     modelId?: string;
     thinkingLevel?: string | null;
     label?: string;
     signal?: AbortSignal;
   }): Promise<PiOAuthBegin> {
-    if (!SUBSCRIPTION_SIGN_IN_PROVIDERS[input.provider]) {
+    const providerMeta = SUBSCRIPTION_SIGN_IN_PROVIDERS[input.provider];
+    if (!providerMeta) {
       throw new Error(
         "In-app subscription sign-in is only available for ChatGPT Plus/Pro, Claude Pro/Max, GitHub Copilot, and SuperGrok.",
       );
+    }
+    const requestedMode = input.mode ?? providerMeta.mode;
+    if (requestedMode !== providerMeta.mode && requestedMode !== providerMeta.alternateMode) {
+      throw new Error(`Sign-in mode ${requestedMode} is not available for ${input.provider}.`);
     }
     if (input.signal?.aborted) {
       throw input.signal.reason ?? new Error("Sign-in cancelled.");
@@ -869,6 +956,7 @@ export class PiOAuthLogins {
         userId: input.userId,
         spaceId: input.spaceId,
         provider: input.provider,
+        mode: requestedMode,
         modelId: input.modelId,
         thinkingLevel: input.thinkingLevel,
         label: input.label,
@@ -877,69 +965,90 @@ export class PiOAuthLogins {
       };
 
       const signInStarted = deferred<PiOAuthStarted>();
+      const registerOAuthState = (stateParam: string) => {
+        session.oauthState = stateParam;
+        this.pendingByOAuthState.set(stateParam, session);
+      };
 
-      const done = this.loginFn(input.provider, "oauth", {
-        signal: abort.signal,
-        async prompt(prompt) {
-          if (prompt.type === "select") {
-            const option = prompt.options.find((entry) => entry.id === "device_code");
-            if (!option) {
-              throw new Error("Device-code sign-in is not available for this provider.");
-            }
-            return option.id;
-          }
-          if (prompt.type === "manual_code") {
-            return new Promise<string>((resolve, reject) => {
-              const signals = [abort.signal, prompt.signal].filter(
-                (signal): signal is AbortSignal => signal !== undefined,
-              );
-              const removeAbortListeners = () => {
-                for (const signal of signals) signal.removeEventListener("abort", onAbort);
-              };
-              const onAbort = (event: Event) => {
-                removeAbortListeners();
-                session.submitCode = undefined;
-                const signal = event.currentTarget as AbortSignal;
-                reject(signal.reason ?? new Error("Sign-in cancelled."));
-              };
-              session.submitCode = (code) => {
-                removeAbortListeners();
-                session.submitCode = undefined;
-                resolve(code);
-              };
-              const aborted = signals.find((signal) => signal.aborted);
-              if (aborted) {
-                removeAbortListeners();
-                session.submitCode = undefined;
-                reject(aborted.reason ?? new Error("Sign-in cancelled."));
-              } else {
-                for (const signal of signals)
-                  signal.addEventListener("abort", onAbort, { once: true });
+      const done = this.loginFn(
+        input.provider,
+        "oauth",
+        {
+          signal: abort.signal,
+          async prompt(prompt) {
+            if (prompt.type === "select") {
+              const targetId = requestedMode === "auth-url" ? "browser" : "device_code";
+              const option = prompt.options.find((entry) => entry.id === targetId);
+              if (!option) {
+                throw new Error("Device-code sign-in is not available for this provider.");
               }
-            });
-          }
-          // Copilot asks for a GitHub Enterprise host first. Blank is github.com.
-          if (prompt.type === "text") return "";
-          throw new Error("Unexpected subscription login prompt.");
+              return option.id;
+            }
+            if (prompt.type === "manual_code") {
+              return new Promise<string>((resolve, reject) => {
+                const signals = [abort.signal, prompt.signal].filter(
+                  (signal): signal is AbortSignal => signal !== undefined,
+                );
+                const removeAbortListeners = () => {
+                  for (const signal of signals) signal.removeEventListener("abort", onAbort);
+                };
+                const onAbort = (event: Event) => {
+                  removeAbortListeners();
+                  session.submitCode = undefined;
+                  const signal = event.currentTarget as AbortSignal;
+                  reject(signal.reason ?? new Error("Sign-in cancelled."));
+                };
+                session.submitCode = (code) => {
+                  removeAbortListeners();
+                  session.submitCode = undefined;
+                  resolve(code);
+                };
+                const aborted = signals.find((signal) => signal.aborted);
+                if (aborted) {
+                  removeAbortListeners();
+                  session.submitCode = undefined;
+                  reject(aborted.reason ?? new Error("Sign-in cancelled."));
+                } else {
+                  for (const signal of signals)
+                    signal.addEventListener("abort", onAbort, { once: true });
+                }
+              });
+            }
+            // Copilot asks for a GitHub Enterprise host first. Blank is github.com.
+            if (prompt.type === "text") return "";
+            throw new Error("Unexpected subscription login prompt.");
+          },
+          notify(event) {
+            if (event.type === "device_code") {
+              signInStarted.resolve({
+                mode: "device-code",
+                userCode: event.userCode,
+                verificationUri: httpsAuthorizationUrl(event.verificationUri),
+                expiresInSeconds: event.expiresInSeconds ?? 15 * 60,
+              });
+            }
+            if (event.type === "auth_url") {
+              const verificationUri = httpsAuthorizationUrl(event.url);
+              const stateParam = new URL(verificationUri).searchParams.get("state")?.trim();
+              if (stateParam) {
+                registerOAuthState(stateParam);
+              }
+              signInStarted.resolve({
+                mode: "auth-url",
+                verificationUri,
+                expiresInSeconds:
+                  input.provider === CHATGPT_OAUTH_PROVIDER
+                    ? OPENAI_OAUTH_STATE_TTL_SECONDS
+                    : 15 * 60,
+              });
+            }
+          },
         },
-        notify(event) {
-          if (event.type === "device_code") {
-            signInStarted.resolve({
-              mode: "device-code",
-              userCode: event.userCode,
-              verificationUri: httpsAuthorizationUrl(event.verificationUri),
-              expiresInSeconds: event.expiresInSeconds ?? 15 * 60,
-            });
-          }
-          if (event.type === "auth_url") {
-            signInStarted.resolve({
-              mode: "auth-url",
-              verificationUri: httpsAuthorizationUrl(event.url),
-              expiresInSeconds: 15 * 60,
-            });
-          }
+        {
+          mode: requestedMode,
+          ...(input.redirectUri ? { redirectUri: input.redirectUri } : {}),
         },
-      })
+      )
         .then((credential) => {
           if (!isOAuthCredential(credential)) {
             throw new Error("Subscription sign-in did not return an OAuth credential.");
@@ -954,6 +1063,7 @@ export class PiOAuthLogins {
           throw error;
         });
 
+      session.done = done;
       if (input.signal?.aborted) abortFromRequest();
       else
         input.signal?.addEventListener("abort", abortFromRequest, {
@@ -991,6 +1101,9 @@ export class PiOAuthLogins {
           session.expired = true;
           return;
         }
+        if (session.oauthState && !this.consumedStates.has(session.oauthState)) {
+          this.recordState(this.expiredStates, session.oauthState, session);
+        }
         session.abort.abort(new Error("Sign-in expired."));
         this.removeSession(session);
       }, started.expiresInSeconds * 1000);
@@ -1017,18 +1130,249 @@ export class PiOAuthLogins {
     const normalizedCode = code.trim();
     if (!normalizedCode) throw new Error("Paste an authorization code or callback URL.");
     const resolve = session.submitCode;
-    if (session.codeSubmitted) return { ok: true };
+    if (
+      session.codeSubmitted ||
+      (session.oauthState && this.consumedStates.has(session.oauthState))
+    ) {
+      if (session.provider === CHATGPT_OAUTH_PROVIDER) {
+        throw new Error("OAuth callback has already been used.");
+      }
+      return { ok: true };
+    }
     if (!resolve) {
       throw new Error("This sign-in is not waiting for a pasted code.");
+    }
+    if (session.provider === CHATGPT_OAUTH_PROVIDER && session.oauthState) {
+      const parsed = parseOpenAiAuthorizationInput(normalizedCode);
+      if (!parsed.state) {
+        throw new Error("Missing OAuth state.");
+      }
+      if (!timingSafeEqualStrings(parsed.state, session.oauthState)) {
+        throw new Error("OAuth state mismatch.");
+      }
+      if (!parsed.code) {
+        throw new Error("Missing authorization code.");
+      }
+      this.pendingByOAuthState.delete(session.oauthState);
+      this.recordState(this.consumedStates, session.oauthState, session);
     }
     session.codeSubmitted = true;
     resolve(normalizedCode);
     return { ok: true };
   }
 
+  async completeCallback<T>(
+    input: {
+      provider: string;
+      userId: string;
+      spaceId?: string;
+      loginId?: string;
+      state?: string;
+      code?: string;
+      error?: string;
+      callbackUrl?: string;
+    },
+    persist: (result: PiOAuthConnected & { spaceId: string }) => Promise<T>,
+  ): Promise<PiOAuthCallbackResult<T>> {
+    this.pruneRecordedStates();
+    const state = input.state?.trim() ?? "";
+    if (!state) {
+      return {
+        status: "error",
+        code: "missing_state",
+        error: "Missing OAuth state.",
+      };
+    }
+
+    if (this.consumedStates.has(state)) {
+      return {
+        status: "error",
+        code: "replayed_state",
+        error: "OAuth callback has already been used.",
+      };
+    }
+
+    const expired = this.expiredStates.get(state);
+    if (expired) {
+      if (expired.provider !== input.provider) {
+        return {
+          status: "error",
+          code: "invalid_state",
+          error: "OAuth state does not match this provider.",
+        };
+      }
+      if (expired.userId !== input.userId || (input.spaceId && expired.spaceId !== input.spaceId)) {
+        return {
+          status: "error",
+          code: "forbidden",
+          error: "OAuth session belongs to a different account or space.",
+        };
+      }
+      return {
+        status: "error",
+        code: "expired_state",
+        error: "OAuth state has expired. Start sign-in again.",
+      };
+    }
+
+    const cancelled = this.cancelledStates.get(state);
+    if (cancelled) {
+      if (
+        cancelled.userId !== input.userId ||
+        (input.spaceId && cancelled.spaceId !== input.spaceId)
+      ) {
+        return {
+          status: "error",
+          code: "forbidden",
+          error: "OAuth session belongs to a different account or space.",
+        };
+      }
+      return {
+        status: "error",
+        code: "cancelled",
+        error: "Sign-in was cancelled.",
+      };
+    }
+
+    const session = this.pendingByOAuthState.get(state);
+    if (!session?.oauthState || !timingSafeEqualStrings(state, session.oauthState)) {
+      return {
+        status: "error",
+        code: "invalid_state",
+        error: "Invalid OAuth state. Start sign-in again.",
+      };
+    }
+
+    if (session.provider !== input.provider) {
+      return {
+        status: "error",
+        code: "invalid_state",
+        error: "OAuth state does not match this provider.",
+      };
+    }
+    if (session.userId !== input.userId || (input.spaceId && session.spaceId !== input.spaceId)) {
+      return {
+        status: "error",
+        code: "forbidden",
+        error: "OAuth session belongs to a different account or space.",
+      };
+    }
+    if (input.loginId && session.id !== input.loginId) {
+      return {
+        status: "error",
+        code: "invalid_state",
+        error: "OAuth state does not match the active sign-in session.",
+      };
+    }
+    if (session.codeSubmitted) {
+      return {
+        status: "error",
+        code: "replayed_state",
+        error: "OAuth callback has already been used.",
+      };
+    }
+
+    // Consume state before awaiting any network or persistence work to guarantee single use.
+    this.pendingByOAuthState.delete(state);
+    this.recordState(this.consumedStates, state, session);
+    session.codeSubmitted = true;
+
+    const oauthError = input.error?.trim();
+    if (oauthError) {
+      await this.cancel(session.id, { userId: session.userId, spaceId: session.spaceId });
+      return {
+        status: "error",
+        code: "provider_error",
+        error: "ChatGPT sign-in was cancelled or denied.",
+      };
+    }
+
+    const code = input.code?.trim() ?? "";
+    if (!code) {
+      await this.cancel(session.id, { userId: session.userId, spaceId: session.spaceId });
+      return {
+        status: "error",
+        code: "exchange_failed",
+        error: "Missing authorization code.",
+      };
+    }
+
+    const resolvePrompt = session.submitCode;
+    if (!resolvePrompt) {
+      await this.cancel(session.id, { userId: session.userId, spaceId: session.spaceId });
+      return {
+        status: "error",
+        code: "exchange_failed",
+        error: "Sign-in session is no longer waiting for a callback.",
+      };
+    }
+
+    resolvePrompt(input.callbackUrl ?? `${code}#${state}`);
+    try {
+      await session.done;
+    } catch (error) {
+      this.removeSession(session);
+      return {
+        status: "error",
+        code: "exchange_failed",
+        error:
+          error instanceof Error
+            ? error.message
+            : "OpenAI token exchange failed. Start sign-in again.",
+      };
+    }
+
+    let finished: PiOAuthFinish<T>;
+    try {
+      finished = await this.finish(
+        session.id,
+        { userId: session.userId, spaceId: session.spaceId },
+        (login) => persist({ ...login, spaceId: session.spaceId }),
+      );
+    } catch (error) {
+      return {
+        status: "error",
+        code: "exchange_failed",
+        error: error instanceof Error ? error.message : "Could not save ChatGPT credential.",
+      };
+    }
+    if (finished.status !== "connected") {
+      return {
+        status: "error",
+        code: "exchange_failed",
+        error:
+          finished.status === "error"
+            ? finished.error
+            : "Sign-in did not complete. Start sign-in again.",
+      };
+    }
+
+    this.recordPersistedResult(session.id, session, finished.value);
+    return {
+      status: "connected",
+      loginId: session.id,
+      spaceId: session.spaceId,
+      value: finished.value,
+    };
+  }
+
   complete(loginId: string, actor: { userId: string; spaceId: string }): PiOAuthComplete {
     const session = this.pending.get(loginId);
     if (!session || session.userId !== actor.userId || session.spaceId !== actor.spaceId) {
+      const persisted = this.persistedByLoginId.get(loginId);
+      if (persisted && persisted.userId === actor.userId && persisted.spaceId === actor.spaceId) {
+        return {
+          status: "connected",
+          credential: {
+            type: "oauth",
+            access: "",
+            refresh: "",
+            expires: Date.now() + 60_000,
+          },
+          provider: persisted.provider,
+          signal: new AbortController().signal,
+        };
+      }
       return {
         status: "error",
         error: "Sign-in session not found. Start sign-in again.",
@@ -1058,6 +1402,15 @@ export class PiOAuthLogins {
     actor: { userId: string; spaceId: string },
     persist: (result: PiOAuthConnected) => Promise<T>,
   ): Promise<PiOAuthFinish<T>> {
+    const alreadyPersisted = this.persistedByLoginId.get(loginId);
+    if (
+      alreadyPersisted &&
+      alreadyPersisted.userId === actor.userId &&
+      alreadyPersisted.spaceId === actor.spaceId
+    ) {
+      this.persistedByLoginId.delete(loginId);
+      return { status: "connected", value: alreadyPersisted.value as T };
+    }
     const session = this.pending.get(loginId);
     if (!session || session.userId !== actor.userId || session.spaceId !== actor.spaceId) {
       return {
@@ -1111,6 +1464,13 @@ export class PiOAuthLogins {
         continue;
       }
       if (session.state === "consumed") return;
+      if (
+        session.oauthState &&
+        !this.consumedStates.has(session.oauthState) &&
+        !this.expiredStates.has(session.oauthState)
+      ) {
+        this.recordState(this.cancelledStates, session.oauthState, session);
+      }
       session.abort.abort(new Error("Sign-in cancelled."));
       this.removeSession(session);
       return;
@@ -1154,6 +1514,13 @@ export class PiOAuthLogins {
         this.removeSession(session);
         continue;
       }
+      if (
+        session.oauthState &&
+        !this.consumedStates.has(session.oauthState) &&
+        !this.expiredStates.has(session.oauthState)
+      ) {
+        this.recordState(this.cancelledStates, session.oauthState, session);
+      }
       session.abort.abort(new Error("Sign-in replaced."));
       this.removeSession(session);
       return;
@@ -1184,9 +1551,60 @@ export class PiOAuthLogins {
     );
   }
 
+  private recordState(
+    target: Map<string, RecordedOAuthState>,
+    state: string,
+    session: Session,
+  ): void {
+    this.pruneRecordedStates();
+    target.set(state, {
+      loginId: session.id,
+      userId: session.userId,
+      spaceId: session.spaceId,
+      provider: session.provider,
+      at: Date.now(),
+    });
+    while (target.size > MAX_RECORDED_OAUTH_STATES) {
+      const oldest = target.keys().next().value;
+      if (oldest === undefined) break;
+      target.delete(oldest);
+    }
+  }
+
+  private recordPersistedResult(loginId: string, session: Session, value: unknown): void {
+    this.pruneRecordedStates();
+    this.persistedByLoginId.set(loginId, {
+      userId: session.userId,
+      spaceId: session.spaceId,
+      provider: session.provider,
+      value,
+      at: Date.now(),
+    });
+    while (this.persistedByLoginId.size > MAX_RECORDED_OAUTH_STATES) {
+      const oldest = this.persistedByLoginId.keys().next().value;
+      if (oldest === undefined) break;
+      this.persistedByLoginId.delete(oldest);
+    }
+  }
+
+  private pruneRecordedStates(): void {
+    const cutoff = Date.now() - RECORDED_OAUTH_STATE_TTL_MS;
+    for (const map of [this.consumedStates, this.expiredStates, this.cancelledStates]) {
+      for (const [key, entry] of map) {
+        if (entry.at < cutoff) map.delete(key);
+      }
+    }
+    for (const [key, entry] of this.persistedByLoginId) {
+      if (entry.at < cutoff) this.persistedByLoginId.delete(key);
+    }
+  }
+
   private removeSession(session: Session): void {
     if (session.expiresTimer) clearTimeout(session.expiresTimer);
     session.expiresTimer = undefined;
+    if (session.oauthState && this.pendingByOAuthState.get(session.oauthState) === session) {
+      this.pendingByOAuthState.delete(session.oauthState);
+    }
     if (this.pending.get(session.id) === session) this.pending.delete(session.id);
     if (this.activeByScope.get(session.scope) === session) {
       this.activeByScope.delete(session.scope);
@@ -1199,6 +1617,11 @@ export class PiOAuthLogins {
       session.abort.abort();
     }
     this.pending.clear();
+    this.pendingByOAuthState.clear();
+    this.consumedStates.clear();
+    this.expiredStates.clear();
+    this.cancelledStates.clear();
+    this.persistedByLoginId.clear();
     this.activeByScope.clear();
   }
 }
@@ -1207,9 +1630,15 @@ function defaultLogin(
   providerId: string,
   type: "oauth",
   interaction: AuthInteraction,
+  options?: LoginOptions,
 ): Promise<Credential> {
   if (providerId === ANTHROPIC_OAUTH_PROVIDER) {
     return createManualAnthropicOAuthLogin()(interaction);
+  }
+  if (providerId === CHATGPT_OAUTH_PROVIDER && options?.mode === "auth-url") {
+    return createOpenAiChatGptOAuthLogin({
+      ...(options.redirectUri ? { redirectUri: options.redirectUri } : {}),
+    })(interaction);
   }
   return builtinModels().login(providerId, type, interaction);
 }

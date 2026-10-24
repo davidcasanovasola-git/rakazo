@@ -419,6 +419,14 @@ export default defineConfig(({ command, mode }) => {
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {
             proxyReq.setHeader("x-forwarded-for", appendForwardedFor(req));
+            const forwardedHost = req.headers["x-forwarded-host"] ?? req.headers.host;
+            if (typeof forwardedHost === "string" && forwardedHost.trim()) {
+              proxyReq.setHeader("x-forwarded-host", forwardedHost.trim());
+            }
+            const forwardedProto = req.headers["x-forwarded-proto"];
+            if (typeof forwardedProto === "string" && forwardedProto.trim()) {
+              proxyReq.setHeader("x-forwarded-proto", forwardedProto.trim());
+            }
           });
         },
       } satisfies ProxyOptions,

@@ -110,6 +110,7 @@ export * from "./pi-live-catalog.js";
 export * from "./pi-live-model.js";
 export * from "./pi-models.js";
 export * from "./pi-oauth.js";
+export * from "./pi-openai-chatgpt-oauth.js";
 export * from "./pi-openai-compatible-provider.js";
 export * from "./pi-runtime.js";
 export * from "./pi-session.js";
