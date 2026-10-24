@@ -191,9 +191,11 @@ export function ModelSettingsOverlay({
               ) : (
                 <>
                   <ConnectionControls {...model} />
-                  <div className="mt-6">
-                    <CatalogModelFields {...model} />
-                  </div>
+                  {model.acceptsKey ? (
+                    <div className="mt-6">
+                      <CatalogModelFields {...model} />
+                    </div>
+                  ) : null}
                 </>
               )}
             </>

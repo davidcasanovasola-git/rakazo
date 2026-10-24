@@ -508,7 +508,7 @@ export function OnboardingPage() {
     void startSubscriptionSignIn({
       provider: selected.provider,
       mode,
-      modelId: selected.id,
+      modelId: acceptsKey ? selected.id : undefined,
       label: selected.providerName ?? selected.provider,
     });
   }
@@ -740,7 +740,7 @@ export function OnboardingPage() {
                         />
                       </ModelThinkingOptions>
                     </>
-                  ) : (
+                  ) : acceptsKey ? (
                     <>
                       <span className="font-medium">
                         <Trans>Model</Trans>
@@ -771,7 +771,7 @@ export function OnboardingPage() {
                         </SelectContent>
                       </Select>
                     </>
-                  )}
+                  ) : null}
                 </div>
                 {subscriptionSignIn ? (
                   <div className="mt-4">

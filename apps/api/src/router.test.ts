@@ -34,6 +34,7 @@ import {
   createRouter,
   enqueueBotIntroRun,
   HEARTBEAT_MS,
+  persistOAuthLoginCredential,
   SESSION_RECHECK_MS,
 } from "./router.js";
 
@@ -4632,6 +4633,81 @@ describe("codex live catalog", () => {
         message: expect.stringMatching(/not available with your current sign-in/i),
       }),
     });
+  });
+
+  it("resolves a newly connected ChatGPT OAuth credential default model from the account's live catalog", async () => {
+    const stamp = new Date("2026-01-01T00:00:00.000Z");
+    const upsert = vi.fn(async () => ({ id: "pref-live" }));
+    const tx = {
+      userModelCredential: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "cred-oauth",
+          createdAt: stamp,
+          updatedAt: stamp,
+          ...data,
+        })),
+      },
+      spaceModelPreference: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+        upsert,
+      },
+      secret: {
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => data),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+    };
+    const deps = {
+      prisma: { ...tx, $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)) },
+      secrets: {
+        put: vi.fn(async (plaintext: string) => ({ id: "secret-oauth", ciphertext: plaintext })),
+        load: vi.fn(async (ciphertext: string) => ciphertext),
+      },
+      env: {
+        defaultProvider: "fake",
+        defaultModel: "fake-model",
+        webOrigin: "http://127.0.0.1:5173",
+        screenProxySecret: "fake-test-secret",
+        sandboxProvider: "fake",
+      },
+      codexCatalog: {
+        read: vi.fn(async () => [
+          liveModel("gpt-5.6-sol"),
+          liveModel("gpt-5.6-terra"),
+          liveModel("gpt-5.6-luna"),
+        ]),
+      },
+    } as unknown as RouterDeps;
+
+    const saved = await persistOAuthLoginCredential(
+      deps,
+      actor,
+      {
+        provider: "openai-codex",
+        credential: {
+          access: "access-token",
+          refresh: "refresh-token",
+          expires: Date.now() + 60_000,
+          accountId: "acct-live-test",
+        },
+        modelId: luna,
+        thinkingLevel: null,
+        label: "ChatGPT",
+        signal: new AbortController().signal,
+      },
+      deps.codexCatalog,
+    );
+
+    expect(saved.modelId).toBe("gpt-5.6-luna");
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ modelId: "gpt-5.6-luna", isDefault: true }),
+        update: expect.objectContaining({ modelId: "gpt-5.6-luna", isDefault: true }),
+      }),
+    );
   });
 
   it.each(["unchanged", "rotated", "reconnected", "unavailable"] as const)(

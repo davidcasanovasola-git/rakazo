@@ -1152,6 +1152,7 @@ it("offers Sign in with ChatGPT (auth-url) alongside device-code for openai-code
   const view = await renderSettings();
   try {
     expect(buttons(view.container, "Sign in with ChatGPT Plus/Pro")).toHaveLength(1);
+    expect(view.container.querySelector("#model-select")).toBeNull();
     const siwcButton = buttons(view.container, "Sign in with ChatGPT").find(
       (btn) => btn.textContent === "Sign in with ChatGPT",
     );
@@ -1168,7 +1169,7 @@ it("offers Sign in with ChatGPT (auth-url) alongside device-code for openai-code
       {
         provider: "openai-codex",
         mode: "auth-url",
-        modelId: "fixture-model",
+        modelId: undefined,
         thinkingLevel: null,
         label: "ChatGPT",
       },

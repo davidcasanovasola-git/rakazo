@@ -114,11 +114,11 @@ export function useModelSettings(onClose: () => void) {
     onClearError: () => setError(null),
     onError: setError,
     onFinished: async () => {
-      await refresh();
+      await refresh({ preferSavedModel: true });
     },
   });
 
-  async function refresh() {
+  async function refresh(opts?: { preferSavedModel?: boolean }) {
     const refreshRevision = ++refreshRevisionRef.current;
     const selectionRevision = selectionRevisionRef.current;
     const [nextCatalog, nextCredentials, nextMe] = await Promise.all([
@@ -137,8 +137,10 @@ export function useModelSettings(onClose: () => void) {
         ? (nextCredential?.modelId ??
           (nextMe.defaultProvider === OPENAI_COMPATIBLE_PROVIDER_ID ? nextMe.defaultModel : "") ??
           "")
-        : (nextCatalog.find((entry) => entry.provider === nextProvider && entry.id === modelId)
-            ?.id ??
+        : ((!opts?.preferSavedModel
+            ? nextCatalog.find((entry) => entry.provider === nextProvider && entry.id === modelId)
+                ?.id
+            : undefined) ??
           pickCatalogModelId(
             nextCatalog,
             nextProvider,
@@ -695,14 +697,17 @@ export function useModelSettings(onClose: () => void) {
   function beginSelectedSubscriptionSignIn(mode?: ModelOAuthSignInMode) {
     if (!selected) return;
     setNotice(null);
+    const hasModelPicker = Boolean(credential) || acceptsKey;
     void startSubscriptionSignIn({
       provider: selected.provider,
       mode,
-      modelId: selected.id,
-      thinkingLevel: clampCatalogThinkingLevel(
-        thinkingLevel,
-        selected.thinkingLevels,
-      ) as ThinkingLevel | null,
+      modelId: hasModelPicker ? selected.id : undefined,
+      thinkingLevel: hasModelPicker
+        ? (clampCatalogThinkingLevel(
+            thinkingLevel,
+            selected.thinkingLevels,
+          ) as ThinkingLevel | null)
+        : null,
       label: selected.providerName ?? selected.provider,
     });
   }

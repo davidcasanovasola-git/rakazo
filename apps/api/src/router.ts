@@ -116,6 +116,7 @@ import {
   resolveBotUploadPath,
   resolveBotWorkspaceCwd,
   resolveBotWorkspacePath,
+  resolveCodexOAuthDefaultModel,
   revokeScreenControl,
   routineRunModelPin,
   sanitizeComposioError,
@@ -7509,6 +7510,7 @@ async function persistModelCredential(
   codexCatalog: CodexLiveCatalog,
 ) {
   throwIfAborted(input.signal);
+  const parsedSecret = parseModelSecret(input.plaintext);
   const requestedModelId = usableModelId(input.modelId);
   const authError = requestedModelId
     ? validateModelAuthAvailability(input.provider, requestedModelId, input.plaintext)
@@ -7518,17 +7520,22 @@ async function persistModelCredential(
   if (
     authError &&
     requestedModelId &&
-    !(await codexLiveListsModel(
-      codexCatalog,
-      actor.userId,
-      parseModelSecret(input.plaintext),
-      requestedModelId,
-    ))
+    !(await codexLiveListsModel(codexCatalog, actor.userId, parsedSecret, requestedModelId))
   ) {
     throw new ORPCError("BAD_REQUEST", { message: authError });
   }
+  const resolvedCodexModelId =
+    canonicalPiProviderId(input.provider) === CHATGPT_OAUTH_PROVIDER &&
+    parsedSecret.kind === "oauth"
+      ? await resolveCodexOAuthDefaultModel(
+          codexCatalog,
+          actor.userId,
+          parsedSecret,
+          requestedModelId,
+        )
+      : requestedModelId;
   const defaultModel =
-    requestedModelId ??
+    resolvedCodexModelId ??
     defaultCatalogModelId(input.provider, input.plaintext) ??
     usableModelId(deps.env.defaultModel);
   // A compatible connect may enable its new default, so judge it by the secret being saved.

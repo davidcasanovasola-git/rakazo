@@ -186,6 +186,7 @@ export default function Models() {
   const confirmedBackupModelsRef = useRef<ModelBackupChoice[]>([]);
   const meRef = useRef<MobileMe | null>(null);
   meRef.current = me;
+  const selectedLabelRef = useRef<string | undefined>(undefined);
   const [feedbackAnchor, setFeedbackAnchor] = useState<FeedbackAnchor>("connection");
   const oauthAbortRef = useRef<AbortController | null>(null);
   const oauthLoginIdRef = useRef<string | null>(null);
@@ -303,6 +304,7 @@ export default function Models() {
       const nextEntry = nextCatalog.find(
         (entry) => entry.provider === nextProvider && entry.id === nextModel,
       );
+      selectedLabelRef.current = nextEntry?.label;
       setThinkingLevel(
         clampCatalogThinkingLevel(
           nextCredential?.modelId === nextModel ? nextCredential.thinkingLevel : null,
@@ -808,10 +810,12 @@ export default function Models() {
       if (controller.signal.aborted) return;
       oauthLoginIdRef.current = null;
       setOauth(null);
-      await load({ provider, modelId });
+      await load({ provider });
       if (controller.signal.aborted) return;
       publishFeedback("connection", {
-        notice: t("Connected and using {label}.", { label: selected?.label ?? t("this model") }),
+        notice: t("Connected and using {label}.", {
+          label: selectedLabelRef.current ?? selected?.label ?? t("this model"),
+        }),
       });
     })().finally(() => {
       if (oauthFinishingRef.current?.loginId === loginId) {
@@ -828,17 +832,20 @@ export default function Models() {
     setOauthPending(true);
     const controller = new AbortController();
     oauthAbortRef.current = controller;
+    const hasModelPicker = Boolean(credential) || acceptsKey;
     try {
       const started = await rpc<ModelOAuthBegin>(
         "models/beginOAuth",
         {
           provider: selected.provider,
           ...(mode ? { mode } : {}),
-          modelId: selected.id,
-          thinkingLevel: clampCatalogThinkingLevel(
-            thinkingLevel,
-            selected.thinkingLevels,
-          ) as ThinkingLevel | null,
+          ...(hasModelPicker ? { modelId: selected.id } : {}),
+          thinkingLevel: hasModelPicker
+            ? (clampCatalogThinkingLevel(
+                thinkingLevel,
+                selected.thinkingLevels,
+              ) as ThinkingLevel | null)
+            : null,
           label: selected.providerName ?? selected.provider,
         },
         { signal: controller.signal },
@@ -1823,7 +1830,7 @@ export default function Models() {
             <>
               {catalogConnectionControls}
               {feedback}
-              {catalogModelCard}
+              {acceptsKey ? catalogModelCard : null}
             </>
           )
         ) : (

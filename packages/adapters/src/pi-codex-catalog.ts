@@ -3,6 +3,7 @@ import type { SecretStore } from "@rakazo/adapter-kit";
 import type { ThinkingLevel } from "@rakazo/contracts";
 import { ThinkingLevelSchema } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
+import { listAvailablePiCatalog } from "./pi-catalog-availability.js";
 import { LiveCatalogCache, liveModelCatalogEnabled } from "./pi-live-cache.js";
 import type { CatalogSpaceAuth } from "./pi-live-catalog.js";
 import { liveCatalogEntry, overlayLiveCatalog } from "./pi-live-catalog.js";
@@ -328,6 +329,57 @@ export async function codexLiveListsModel(
   return Boolean(models?.some((model) => model.slug === modelId));
 }
 
+function knownCodexSlugs(): Set<string> {
+  return new Set(
+    listPiCatalog()
+      .filter((entry) => entry.provider === CHATGPT_OAUTH_PROVIDER)
+      .map((entry) => entry.id),
+  );
+}
+
+/**
+ * Resolve the default `openai-codex` model id for a newly saved ChatGPT OAuth
+ * credential against that account's live catalog. Keeps `requestedModelId` when
+ * the live catalog lists it, otherwise falls back to the account's recommended
+ * or first live model so plans without the static catalog default (e.g.
+ * `gpt-6-luna`) do not save an unsupported model. When the live catalog cannot
+ * be read or is untrusted, returns `requestedModelId` unchanged so callers keep
+ * their static fallback.
+ */
+export async function resolveCodexOAuthDefaultModel(
+  catalog: CodexLiveCatalog | undefined,
+  userId: string,
+  secret: StoredModelSecret,
+  requestedModelId: string | null | undefined,
+  opts?: CodexLiveReadOptions,
+): Promise<string | undefined> {
+  const requested = requestedModelId?.trim() || undefined;
+  if (!catalog || secret.kind !== "oauth") return requested;
+  const account = codexAccountHandle(secret.credential, opts?.onExpiredToken);
+  if (!account) return requested;
+  const models = await catalog.read(userId, account, opts).catch(() => undefined);
+  if (!models || models.length === 0) return requested;
+  const knownSlugs = knownCodexSlugs();
+  if (!models.some((model) => knownSlugs.has(model.slug))) return requested;
+  const secretId = "oauth-connect";
+  const auth: CodexCatalogSpaceAuth = {
+    byProvider: { [CHATGPT_OAUTH_PROVIDER]: "oauth" },
+    byModel: {},
+    secretIdByProvider: { [CHATGPT_OAUTH_PROVIDER]: secretId },
+  };
+  const base = listAvailablePiCatalog(auth.byProvider, auth.byModel).filter(
+    (entry) => entry.provider === CHATGPT_OAUTH_PROVIDER,
+  );
+  const merged = applyCodexLiveCatalog(base, auth, new Map([[secretId, models]])).filter(
+    (entry) => entry.provider === CHATGPT_OAUTH_PROVIDER,
+  );
+  if (merged.length === 0) return requested;
+  if (requested && merged.some((entry) => entry.id === requested)) {
+    return requested;
+  }
+  return merged.find((entry) => entry.recommended)?.id ?? merged[0]?.id;
+}
+
 /**
  * The live per-account catalog for every ChatGPT OAuth credential governing a
  * codex slot in this space, keyed by credential secret id. Credentials that are
@@ -407,11 +459,7 @@ export function applyCodexLiveCatalog(
   auth: CodexCatalogSpaceAuth,
   liveBySecretId: ReadonlyMap<string, readonly CodexCatalogModel[]>,
 ): PiCatalogEntry[] {
-  const knownSlugs = new Set(
-    listPiCatalog()
-      .filter((entry) => entry.provider === CHATGPT_OAUTH_PROVIDER)
-      .map((entry) => entry.id),
-  );
+  const knownSlugs = knownCodexSlugs();
   const trusted = new Map<string, Map<string, CodexCatalogModel>>();
   for (const [secretId, models] of liveBySecretId) {
     if (!models.some((model) => knownSlugs.has(model.slug))) continue;
@@ -456,9 +504,10 @@ export function applyCodexLiveCatalog(
 
 function withLiveFields(entry: PiCatalogEntry, model: CodexCatalogModel): PiCatalogEntry {
   const thinkingLevels = liveThinkingLevels(model);
+  const images = entry.live ? model.supportsImages : entry.images;
   return thinkingLevels
-    ? { ...entry, reasoning: true, thinkingLevels }
-    : { ...entry, reasoning: entry.reasoning || model.reasoningEfforts.length > 0 };
+    ? { ...entry, images, reasoning: true, thinkingLevels }
+    : { ...entry, images, reasoning: entry.reasoning || model.reasoningEfforts.length > 0 };
 }
 
 function liveThinkingLevels(model: CodexCatalogModel): ThinkingLevel[] | undefined {

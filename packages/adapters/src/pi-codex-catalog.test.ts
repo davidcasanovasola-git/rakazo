@@ -10,6 +10,7 @@ import {
   codexLiveListsModel,
   fetchCodexCatalog,
   parseCodexCatalog,
+  resolveCodexOAuthDefaultModel,
 } from "./pi-codex-catalog.js";
 import { listPiCatalog } from "./pi-models.js";
 import { CHATGPT_OAUTH_PROVIDER, parseModelSecret } from "./pi-oauth.js";
@@ -1182,5 +1183,57 @@ describe("applyCodexLiveCatalog", () => {
     expect(otherProviders).toEqual(
       base.filter((entry) => entry.provider !== CHATGPT_OAUTH_PROVIDER),
     );
+  });
+
+  it("preserves supportsImages on live-only codex models", () => {
+    const merged = applyCodexLiveCatalog(
+      base,
+      oauthAuth,
+      liveFor({
+        "secret-a": [liveModel(LUNA), liveModel("gpt-6.5-live-vision", { supportsImages: true })],
+      }),
+    );
+    const liveOnly = merged.find((entry) => entry.id === "gpt-6.5-live-vision");
+    expect(liveOnly?.images).toBe(true);
+  });
+});
+
+describe("resolveCodexOAuthDefaultModel", () => {
+  const oauthSecret = (access = ACCESS_TOKEN, expiresInMs = 3_600_000, accountId = ACCOUNT_ID) =>
+    parseModelSecret(oauthPlaintext(access, expiresInMs, accountId));
+
+  it("replaces an unavailable static default with the account's first live catalog model", async () => {
+    const read = vi.fn(async () => [
+      liveModel("gpt-5.6-sol"),
+      liveModel("gpt-5.6-terra"),
+      liveModel("gpt-5.6-luna"),
+    ]);
+    await expect(
+      resolveCodexOAuthDefaultModel({ read }, "user-1", oauthSecret(), LUNA),
+    ).resolves.toBe("gpt-5.6-luna");
+    await expect(
+      resolveCodexOAuthDefaultModel({ read }, "user-1", oauthSecret(), undefined),
+    ).resolves.toBe("gpt-5.6-luna");
+  });
+
+  it("keeps the requested model when the account's live catalog lists it", async () => {
+    const read = vi.fn(async () => [liveModel("gpt-5.6-sol"), liveModel("gpt-5.6-luna")]);
+    await expect(
+      resolveCodexOAuthDefaultModel({ read }, "user-1", oauthSecret(), "gpt-5.6-sol"),
+    ).resolves.toBe("gpt-5.6-sol");
+  });
+
+  it("returns the requested model unchanged when the live catalog is unreadable or untrusted", async () => {
+    const emptyRead = vi.fn(async () => undefined);
+    await expect(
+      resolveCodexOAuthDefaultModel({ read: emptyRead }, "user-1", oauthSecret(), LUNA),
+    ).resolves.toBe(LUNA);
+    await expect(
+      resolveCodexOAuthDefaultModel(undefined, "user-1", oauthSecret(), LUNA),
+    ).resolves.toBe(LUNA);
+    const untrustedRead = vi.fn(async () => [liveModel("foreign-only-slug")]);
+    await expect(
+      resolveCodexOAuthDefaultModel({ read: untrustedRead }, "user-1", oauthSecret(), LUNA),
+    ).resolves.toBe(LUNA);
   });
 });

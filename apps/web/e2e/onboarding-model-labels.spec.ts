@@ -38,11 +38,11 @@ test("onboarding requires a model and uses compact model selects without mislead
   await provider.click();
   await page.getByRole("option", { name: "ChatGPT subscription", exact: true }).click();
   const model = page.getByRole("combobox", { name: "Model", exact: true });
-  await expect(model).toHaveText("GPT-6 Luna");
-  await captureScreenshot(page, testInfo, "onboarding-luna-default");
+  await expect(model).toHaveCount(0);
   await provider.click();
   await page.getByRole("option", { name: "OpenAI API", exact: true }).click();
   await expect(model).toHaveText("GPT-6 Luna");
+  await captureScreenshot(page, testInfo, "onboarding-luna-default");
   await provider.click();
   await page.getByRole("option", { name: "OpenRouter", exact: true }).click();
   await expect(model).toContainText("GPT-6 Luna");
