@@ -118,7 +118,7 @@ export function HostComputerPrompt({
         if (configuring) setOpen(next);
       }}
     >
-      <DialogContent showCloseButton={configuring} className="rounded-2xl p-6 sm:max-w-[440px]">
+      <DialogContent showCloseButton={configuring} className="rounded-2xl sm:max-w-[440px]">
         <DialogHeader>
           <DialogTitle className="text-[22px]">
             <Trans>Where should bots run?</Trans>

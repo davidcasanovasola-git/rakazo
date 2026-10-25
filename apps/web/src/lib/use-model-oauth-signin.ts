@@ -11,6 +11,7 @@ export type ModelOAuthSignInBegin = {
   mode?: ModelOAuthSignInMode;
   modelId?: string;
   thinkingLevel?: ThinkingLevel | null;
+  makeDefault?: boolean;
   label?: string;
 };
 
@@ -137,6 +138,7 @@ export function useModelOAuthSignIn(options: {
           ...(begin.mode ? { mode: begin.mode } : {}),
           modelId: begin.modelId,
           thinkingLevel: begin.thinkingLevel,
+          makeDefault: begin.makeDefault,
           label: begin.label,
         },
         { signal: controller.signal },

@@ -29,8 +29,11 @@ export function ModelPickerList({
   error,
   providerLabel,
   emptyMessage,
+  connectChoices,
 }: {
   choices: readonly ChatModelChoice[] | null;
+  /** Providers that need a connection first, listed after the models. */
+  connectChoices?: readonly ChatModelChoice[];
   selectedKey: string;
   onSelect: (choice: ChatModelChoice) => void;
   error?: string | null;
@@ -86,21 +89,26 @@ export function ModelPickerList({
     });
   }, [navigation, t, changeQuery]);
 
-  const sections = useMemo(
-    () =>
-      choices
-        ? groupModelChoices(choices, query).map((section) => ({
-            ...section,
-            heading:
-              providerLabel && section.heading === providerLabel
-                ? undefined
-                : providerLabel && section.heading?.startsWith(`${providerLabel} · `)
-                  ? section.heading.slice(providerLabel.length + 3)
-                  : section.heading,
-          }))
-        : [],
-    [choices, query, providerLabel],
-  );
+  const sections = useMemo(() => {
+    if (!choices) return [];
+    const models = groupModelChoices(choices, query).map((section) => ({
+      ...section,
+      connect: false,
+      heading:
+        providerLabel && section.heading === providerLabel
+          ? undefined
+          : providerLabel && section.heading?.startsWith(`${providerLabel} · `)
+            ? section.heading.slice(providerLabel.length + 3)
+            : section.heading,
+    }));
+    const connect = groupModelChoices(
+      (connectChoices ?? []).map((choice) => ({ ...choice, providerLabel: undefined })),
+      query,
+    ).flatMap((section) => section.data);
+    return connect.length
+      ? [...models, { key: "connect", heading: undefined, connect: true, data: connect }]
+      : models;
+  }, [choices, connectChoices, query, providerLabel]);
   useLayoutEffect(() => {
     const state = initialScroll.current;
     if (state.handled || state.cancelled || choices === null) return;
@@ -246,6 +254,8 @@ export function ModelPickerList({
               onPress={() => onSelect(item)}
               title={item.title ?? item.label}
               detail={item.detail}
+              value={section.connect ? t("Connect") : undefined}
+              chevron={section.connect ? "right" : undefined}
               trailing={
                 item.images === false || selected ? (
                   <View style={styles.trailing}>

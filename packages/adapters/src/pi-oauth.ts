@@ -306,6 +306,7 @@ export type PiOAuthConnected = {
   provider: string;
   modelId?: string;
   thinkingLevel?: string | null;
+  makeDefault?: boolean;
   label?: string;
   signal: AbortSignal;
 };
@@ -385,6 +386,7 @@ type Session = {
   mode: ModelOAuthSignInMode;
   modelId?: string;
   thinkingLevel?: string | null;
+  makeDefault?: boolean;
   label?: string;
   abort: AbortController;
   state: SessionState;
@@ -924,6 +926,7 @@ export class PiOAuthLogins {
     redirectUri?: string;
     modelId?: string;
     thinkingLevel?: string | null;
+    makeDefault?: boolean;
     label?: string;
     signal?: AbortSignal;
   }): Promise<PiOAuthBegin> {
@@ -959,6 +962,7 @@ export class PiOAuthLogins {
         mode: requestedMode,
         modelId: input.modelId,
         thinkingLevel: input.thinkingLevel,
+        makeDefault: input.makeDefault,
         label: input.label,
         abort,
         state: "pending",
@@ -1426,6 +1430,7 @@ export class PiOAuthLogins {
         provider: session.provider,
         modelId: session.modelId,
         thinkingLevel: session.thinkingLevel,
+        makeDefault: session.makeDefault,
         label: session.label,
         signal: session.abort.signal,
       };

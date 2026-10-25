@@ -40,8 +40,17 @@ IRSA or EC2 instance role, opt in with `PI_DEFAULT_CREDENTIALS=host` and set
 `PI_DEFAULT_PROVIDER=amazon-bedrock`, `PI_DEFAULT_MODEL` and `AWS_REGION`. With an instance
 role, keep [restricted computer egress](#restricted-computer-egress) on so bot computers
 cannot read the role's credentials from the metadata endpoint.
-Auto Review uses that LLM checker by default. To use TypeSafe Jev instead, set
-`RAKAZO_AUTO_REVIEW_PROVIDER=jev` and `TYPESAFE_API_KEY`. Core still runs with neither.
+Auto Review is opt-in. In **Settings → Models → Approval model**, each user can select a model
+from an existing connection and add ordered backups, independently of their main model. Personal
+connections use their own credentials; hosted calls follow the same Rakazo credit rules as chat.
+Backups are tried only when a checker fails. An explicit ask, including an uncertain decision,
+still requires a person.
+
+The deployment checker remains the default when no approval model is selected. For OpenRouter
+Jev, set `RAKAZO_AUTO_REVIEW_PROVIDER=openrouter` and
+`RAKAZO_AUTO_REVIEW_MODEL=typesafe/jev-1.14`; it uses `OPENROUTER_API_KEY` and the Decisions API.
+TypeSafe direct remains available through `RAKAZO_AUTO_REVIEW_PROVIDER=jev` and
+`TYPESAFE_API_KEY`. Core runs without either hosted service.
 
 The example defaults to `edge` (main builds). Every publish is multi-arch (`amd64` + `arm64`), so
 arm64 hosts need no special tag. Do not assume `latest` is present until a stable release exists.
